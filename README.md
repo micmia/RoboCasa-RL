@@ -1,6 +1,6 @@
 # RoboCasa-RL
 
-Reinforcement learning experiments built on top of [RoboCasa](https://github.com/robocasa/robocasa) and [roboZsuite](https://github.com/ARISE-Initiative/robosuite).
+Reinforcement learning experiments built on top of [RoboCasa](https://github.com/robocasa/robocasa) and [robosuite](https://github.com/ARISE-Initiative/robosuite).
 
 ## Installation
 

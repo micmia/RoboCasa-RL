@@ -1,0 +1,10 @@
+[project]
+name = "robocasa-rl"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numba>=0.64.0",
+    "numpy==2.2.5",
+]

@@ -41,12 +41,31 @@ uv pip install -e .
 cd ..
 ```
 
-### 4. Set up macros and download assets
+### 4. Install project dependencies
+
+```shell
+cd ..
+uv pip install -e .
+```
+
+### 5. Set up macros and download assets
 
 ```shell
 cd robocasa
 python -m robocasa.scripts.setup_macros
 python -m robocasa.scripts.download_kitchen_assets
+cd ..
 ```
 
 > **Note:** The kitchen assets download is approximately 10 GB.
+
+## Usage
+
+### Demo
+
+```shell
+# Windows/Linux:
+python robocasa/robocasa/demos/demo_kitchen_scenes.py
+# macOS:
+mjpython robocasa/robocasa/demos/demo_kitchen_scenes.py
+```

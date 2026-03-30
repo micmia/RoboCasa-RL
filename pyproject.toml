@@ -8,3 +8,6 @@ dependencies = [
     "numba>=0.64.0",
     "numpy==2.2.5",
 ]
+
+[tool.setuptools.packages.find]
+exclude = ["robocasa*", "robosuite*"]

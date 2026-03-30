@@ -44,6 +44,7 @@ cd ..
 ### 4. Set up macros and download assets
 
 ```shell
+cd robocasa
 python -m robocasa.scripts.setup_macros
 python -m robocasa.scripts.download_kitchen_assets
 ```

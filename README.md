@@ -44,7 +44,6 @@ cd ..
 ### 4. Install project dependencies
 
 ```shell
-cd ..
 uv pip install -e .
 ```
 

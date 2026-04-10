@@ -5,16 +5,14 @@ PPO Evaluation Script for Robocasa PnPCounterToCab
 import argparse
 import os
 import sys
-import gymnasium as gym
 import numpy as np
 import imageio
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-from stable_baselines3 import ...
+from stable_baselines3 import PPO
 from robosuite.wrappers.gym_wrapper import GymWrapper
 from robosuite.controllers import load_composite_controller_config
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from env import MyPnPCounterToCab
+from env.custom_pnp_counter_to_cab import MyPnPCounterToCab
 
 # Camera names used for multi-view visualisation
 VIZ_CAMERAS = [
@@ -70,6 +68,8 @@ def main():
     # Select environment class based on task
     if args.task == "PnPCounterToCab":
         env_cls = MyPnPCounterToCab
+    else:
+        raise ValueError(f"Unsupported task: {args.task}")
 
     # Environment for evaluation (enable renderer if saving video)
     # Note: For video saving we need offscreen renderer
@@ -96,15 +96,17 @@ def main():
         render_camera=VIZ_CAMERAS[0],      # primary render camera
     )
     
+    # Initialize robosuite internals before GymWrapper queries robot metadata.
+    env.reset()
     # Use same wrapper setup as training
     env = GymWrapper(env, keys=None)
     
-    folder_name = args.model_path.split("/")[1]
-    model = ...
+    run_name = os.path.basename(os.path.dirname(args.model_path)) or "eval_run"
+    model = PPO.load(args.model_path)
     
     if args.save_video:
         os.makedirs(args.video_path, exist_ok=True)
-        video_folder = os.path.join(args.video_path, folder_name)
+        video_folder = os.path.join(args.video_path, run_name)
         os.makedirs(video_folder, exist_ok=True)
 
     success_count = 0
@@ -123,8 +125,8 @@ def main():
             
             if args.save_video:
                 # Render all four cameras and stitch into one composite frame.
-                # env stack: FixedObservationWrapper -> GymWrapper -> raw env
-                raw_env = env.env.env
+                # env stack: GymWrapper -> raw env
+                raw_env = env.env
                 composite = render_tiled_frame(raw_env, VIZ_CAMERAS, width=256, height=256)
                 frames.append(composite)
         
@@ -140,7 +142,7 @@ def main():
         print(f"Episode {ep+1}: Reward = {episode_reward:.2f}, Success = {is_success}")
         
         if args.save_video and len(frames) > 0:
-            vid_path = os.path.join(video_folder, f"eval_ep_{ep}.mp4")
+            vid_path = os.path.join(video_folder, f"{run_name}_ep_{ep}.mp4")
             imageio.mimsave(vid_path, frames, fps=20)
             print(f"Saved multi-camera video ({len(VIZ_CAMERAS)} views) to {vid_path}")
 

@@ -52,6 +52,31 @@ Introduire des variations :
 
 Objectif : améliorer la robustesse et la généralisation de la politique.
 
+**Spécification (implémentée dans `scripts/train_robocasa.py`, `env/curriculum.py`, `env/custom_pnp_counter_to_cab.py`)**
+
+- **Règle de progression (hybride)**  
+Passer à l’étape suivante si :
+  - un **budget minimal** par étape est atteint (timesteps), et
+  - le **taux de succès moyen** sur une fenêtre glissante dépasse un seuil.
+
+- **Variables schedulées (robot + objets)**  
+  - **robot** : élargir `robot_spawn_deviation_pos_x`, `robot_spawn_deviation_pos_y`, `robot_spawn_deviation_rot`  
+  - **objets** : élargir progressivement la région de placement via `placement.size` et ajouter progressivement de la variabilité via `placement.rotation`
+
+- **Étapes par défaut (exemple de valeurs)**  
+  - **Stage 0 (facile)** : robot très proche, `placement.size` très petit, `placement.rotation=(0,0)`  
+  - **Stage 1 (moyen)** : robot plus variable, `placement.size` intermédiaire, petite plage de rotation  
+  - **Stage 2 (difficile)** : variabilité robot max, `placement.size` nominal, rotation complète en yaw
+
+- **Seuils par défaut**  
+  - Stage 0 → 1 : 70% sur 100 épisodes
+  - Stage 1 → 2 : 80% sur 100 épisodes
+  - Budget minimal par stage : 50k timesteps (paramétrable)
+
+- **Métriques à logger**  
+  - `info["success"]` : booléen (succès sparse) injecté à chaque step
+  - TensorBoard : `curriculum/stage`, `curriculum/success_rate_window`, `curriculum/episodes_in_window`
+
 ---
 
 ### Phase 4 : Combinaison Imitation + Renforcement (IL + RL)

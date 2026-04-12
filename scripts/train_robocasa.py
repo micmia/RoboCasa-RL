@@ -4,6 +4,7 @@ import argparse
 import os
 import sys
 from datetime import datetime
+from collections import deque
 
 import gymnasium as gym
 import numpy as np
@@ -11,12 +12,14 @@ from robocasa.utils import object_utils as OU
 from robosuite.controllers import load_composite_controller_config
 from robosuite.wrappers.gym_wrapper import GymWrapper
 from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
 # Add parent directory to path to import local env module
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from env.custom_pnp_counter_to_cab import MyPnPCounterToCab
+from env.curriculum import CurriculumWrapper
 
 
 class AtomicRewardShapingWrapper(gym.Wrapper):
@@ -54,6 +57,12 @@ class AtomicRewardShapingWrapper(gym.Wrapper):
         raw_env = self._raw_env()
 
         shaped = 0.0
+        # Provide an explicit boolean success signal for curriculum / logging.
+        try:
+            info["success"] = bool(raw_env._check_success())
+        except Exception:
+            # Best-effort: if unavailable, don't break training.
+            info.setdefault("success", False)
         try:
             obj_pos = raw_env.sim.data.body_xpos[raw_env.obj_body_id["obj"]]
             eef_pos = raw_env.sim.data.site_xpos[raw_env.robots[0].eef_site_id["right"]]
@@ -86,6 +95,79 @@ class AtomicRewardShapingWrapper(gym.Wrapper):
         return obs, float(reward + shaped), terminated, truncated, info
 
 
+class CurriculumCallback(BaseCallback):
+    """
+    Hybrid curriculum progression:
+    - enforce a minimum number of timesteps per stage
+    - then advance when success rate over a rolling window exceeds a threshold
+    """
+
+    def __init__(
+        self,
+        window_size: int = 100,
+        min_timesteps_per_stage: int = 50_000,
+        thresholds: tuple[float, ...] = (0.70, 0.80),
+        verbose: int = 0,
+    ):
+        super().__init__(verbose=verbose)
+        self.window_size = int(window_size)
+        self.min_timesteps_per_stage = int(min_timesteps_per_stage)
+        self.thresholds = tuple(float(x) for x in thresholds)
+
+        self._recent = deque(maxlen=self.window_size)
+        self._stage = 0
+        self._stage_start_timesteps = 0
+
+    def _on_training_start(self) -> None:
+        self._stage = 0
+        self._stage_start_timesteps = 0
+        self._recent.clear()
+        # ensure envs start at stage 0
+        try:
+            self.training_env.env_method("set_stage", self._stage)
+        except Exception:
+            pass
+
+    def _maybe_advance(self) -> None:
+        if self._stage >= len(self.thresholds):
+            return
+        if (self.num_timesteps - self._stage_start_timesteps) < self.min_timesteps_per_stage:
+            return
+        if len(self._recent) < self.window_size:
+            return
+
+        success_rate = float(np.mean(self._recent))
+        if success_rate < self.thresholds[self._stage]:
+            return
+
+        self._stage += 1
+        self._stage_start_timesteps = int(self.num_timesteps)
+        self._recent.clear()
+        self.training_env.env_method("set_stage", self._stage)
+
+    def _on_step(self) -> bool:
+        infos = self.locals.get("infos", None)
+        dones = self.locals.get("dones", None)
+        if infos is None or dones is None:
+            return True
+
+        # Record success only when an episode ends.
+        for done, info in zip(dones, infos):
+            if not done:
+                continue
+            if isinstance(info, dict) and "success" in info:
+                self._recent.append(1.0 if bool(info["success"]) else 0.0)
+
+        # Log for TensorBoard
+        if len(self._recent) > 0:
+            self.logger.record("curriculum/stage", float(self._stage))
+            self.logger.record("curriculum/success_rate_window", float(np.mean(self._recent)))
+            self.logger.record("curriculum/episodes_in_window", float(len(self._recent)))
+
+        self._maybe_advance()
+        return True
+
+
 def make_env(args, rank):
     def _init():
         if args.task != "PnPCounterToCab":
@@ -112,6 +194,8 @@ def make_env(args, rank):
 
         # Initialize robosuite internals before GymWrapper queries robot metadata.
         env.reset()
+        if args.curriculum:
+            env = CurriculumWrapper(env, initial_stage=0)
         env = GymWrapper(env, keys=None)
         if args.custom_reward_shaping:
             env = AtomicRewardShapingWrapper(
@@ -166,6 +250,16 @@ def main():
     parser.add_argument("--place_bonus", type=float, default=1.0)
     parser.add_argument("--success_bonus", type=float, default=5.0)
 
+    parser.add_argument("--curriculum", action="store_true", help="Enable curriculum learning (phase 3).")
+    parser.add_argument("--curriculum_window", type=int, default=100)
+    parser.add_argument("--curriculum_min_timesteps", type=int, default=50_000)
+    parser.add_argument(
+        "--curriculum_thresholds",
+        type=str,
+        default="0.70,0.80",
+        help="Comma-separated success thresholds for stage transitions (e.g. '0.70,0.80').",
+    )
+
     args = parser.parse_args()
 
     train_device = "cuda" if args.gpu else args.device
@@ -190,7 +284,16 @@ def main():
     save_dir = os.path.join(args.model_dir, run_name)
     os.makedirs(save_dir, exist_ok=True)
 
-    model.learn(total_timesteps=args.total_timesteps, progress_bar=True)
+    callback = None
+    if args.curriculum:
+        thresholds = tuple(float(x) for x in args.curriculum_thresholds.split(",") if x.strip() != "")
+        callback = CurriculumCallback(
+            window_size=args.curriculum_window,
+            min_timesteps_per_stage=args.curriculum_min_timesteps,
+            thresholds=thresholds,
+        )
+
+    model.learn(total_timesteps=args.total_timesteps, progress_bar=True, callback=callback)
     save_path = os.path.join(save_dir, "ppo_final")
     model.save(save_path)
     env.close()

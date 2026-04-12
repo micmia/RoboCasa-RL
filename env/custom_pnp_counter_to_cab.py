@@ -70,9 +70,58 @@ class MyPnPCounterToCab(PickPlaceCounterToCabinet):
             
         # Capture the seed if provided
         self.custom_seed = kwargs.get('seed', 0)
+
+        # Curriculum knobs (used by env/curriculum.py wrapper)
+        self.curriculum_stage = 0
+        self.curriculum_difficulty = 0.0
+        self.curriculum_obj_size_xy = None
+        self.curriculum_obj_rot_range = None
         
         super().__init__(*args, **kwargs)
         
+    def set_curriculum(
+        self,
+        stage=None,
+        difficulty=None,
+        obj_size_xy=None,
+        obj_rot_range=None,
+    ):
+        """
+        Set curriculum parameters that affect the next hard-reset (object sampling + optionally robot spawn).
+
+        Notes:
+        - RoboCasa's Kitchen env uses hard resets by default, so `_get_obj_cfgs()` is re-evaluated per episode.
+        - This method is intended to be called *before* `reset()` by an outer wrapper / callback.
+        """
+        if stage is not None:
+            self.curriculum_stage = int(stage)
+        if difficulty is not None:
+            self.curriculum_difficulty = float(np.clip(float(difficulty), 0.0, 1.0))
+        if obj_size_xy is not None:
+            x, y = obj_size_xy
+            self.curriculum_obj_size_xy = (float(x), float(y))
+        if obj_rot_range is not None:
+            a, b = obj_rot_range
+            self.curriculum_obj_rot_range = (float(a), float(b))
+
+    def _get_curriculum_obj_params(self):
+        """
+        Returns (size_xy, rot_range) for sampling the main object on the counter.
+        """
+        # Defaults (match the original task)
+        size_xy = (0.60, 0.30)
+        rot_range = (-np.pi / 4, np.pi / 4)
+
+        if self.curriculum_obj_size_xy is not None:
+            size_xy = self.curriculum_obj_size_xy
+        if self.curriculum_obj_rot_range is not None:
+            rot_range = self.curriculum_obj_rot_range
+
+        # Clamp to non-negative sizes to avoid PlacementError downstream
+        size_xy = (max(0.0, float(size_xy[0])), max(0.0, float(size_xy[1])))
+        rot_range = (float(rot_range[0]), float(rot_range[1]))
+        return size_xy, rot_range
+    
     
     def _get_obj_cfgs(self):
         """
@@ -89,6 +138,7 @@ class MyPnPCounterToCab(PickPlaceCounterToCabinet):
         # Sample object: always apple_1 (using full path to model.xml)
         apple_1_path = os.path.join(base_path, "apple", "apple_1", "model.xml")
         # print("apple_1_path", apple_1_path)
+        obj_size_xy, obj_rot_range = self._get_curriculum_obj_params()
         cfgs.append(
             dict(
                 name="obj",
@@ -99,9 +149,10 @@ class MyPnPCounterToCab(PickPlaceCounterToCabinet):
                     sample_region_kwargs=dict(
                         ref=self.cab,
                     ),
-                    size=(0.60, 0.30),
+                    size=obj_size_xy,
                     pos=(0.0, -1.0),
                     offset=(0.0, 0.10),
+                    rotation=obj_rot_range,
                 ),
             )
         )
@@ -120,6 +171,7 @@ class MyPnPCounterToCab(PickPlaceCounterToCabinet):
                     size=(1.0, 0.30),
                     pos=(0.0, 1.0),
                     offset=(0.0, -0.05),
+                    rotation=(-0.10, 0.10),
                 ),
             )
         )

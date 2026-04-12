@@ -148,6 +148,18 @@ def main():
     parser.add_argument("--model_dir", type=str, default="models")
     parser.add_argument("--run_name", type=str, default="")
 
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        help="Torch device for PPO (auto, cpu, cuda, cuda:0, ...). Default auto picks GPU if available.",
+    )
+    parser.add_argument(
+        "--gpu",
+        action="store_true",
+        help="Train PPO on CUDA (shortcut for --device cuda).",
+    )
+
     parser.add_argument("--custom_reward_shaping", action="store_true")
     parser.add_argument("--reach_w", type=float, default=0.25)
     parser.add_argument("--grasp_bonus", type=float, default=0.5)
@@ -155,6 +167,8 @@ def main():
     parser.add_argument("--success_bonus", type=float, default=5.0)
 
     args = parser.parse_args()
+
+    train_device = "cuda" if args.gpu else args.device
 
     env_fns = [make_env(args, i) for i in range(args.n_envs)]
     env = SubprocVecEnv(env_fns) if args.n_envs > 1 else DummyVecEnv(env_fns)
@@ -168,6 +182,7 @@ def main():
         verbose=1,
         seed=args.seed,
         tensorboard_log=args.log_root,
+        device=train_device,
     )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

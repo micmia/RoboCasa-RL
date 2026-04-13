@@ -1,7 +1,7 @@
 # Guide d'utilisation des tâches atomiques RoboCasa (PandaOmron)
 
-Ce document explique comment entraîner et évaluer une **tâche atomique** RoboCasa dans ce dépôt, **sans navigation**.  
-La tâche par défaut est : `PnPCounterToCab` (prendre un objet sur le plan de travail et le placer dans un placard).
+Ce document décrit le workflow actuel pour entraîner et évaluer la tâche atomique
+`PnPCounterToCab` (sans navigation) avec PPO.
 
 ## 1. Préparer l'environnement
 
@@ -13,61 +13,111 @@ source .venv/bin/activate
 uv pip install -e .
 ```
 
-Si `robosuite` / `robocasa` ne sont pas encore installés, suivez d'abord les étapes dans `README.md`.
+## 2. Scripts principaux (à jour)
 
-## 2. Scripts principaux
-
-- Entraînement : `scripts/train_robocasa.py`
+- Baseline (récompense native) : `scripts/train_ppo_baseline.py`
+- Reward shaping (sans curriculum) : `scripts/train_ppo_reward_shaping.py`
+- Curriculum learning (sans reward shaping custom) : `scripts/train_ppo_curriculum.py`
 - Évaluation : `scripts/eval_robocasa.py`
-- Environnement personnalisé : `env/custom_pnp_counter_to_cab.py`
 
-Configuration actuelle :
+Configuration par défaut :
 
 - Robot : `PandaOmron`
 - Tâche : `PnPCounterToCab`
-- Algorithme : `PPO` (Stable-Baselines3)
-- Récompense : option `custom_reward_shaping` (récompense dense)
+- Algo : `PPO` (Stable-Baselines3)
 
 ## 3. Lancer l'entraînement
 
-Commande recommandée (sans rendu, plus rapide) :
+### 3.1 Baseline
 
 ```bash
-uv run python scripts/train_robocasa.py \
+uv run python scripts/train_ppo_baseline.py \
+  --headless \
+  --total_timesteps 300000 \
+  --n_envs 1 \
+  --run_name baseline_seed42
+```
+
+### 3.2 Reward shaping
+
+```bash
+uv run python scripts/train_ppo_reward_shaping.py \
   --task PnPCounterToCab \
   --headless \
-  --custom_reward_shaping \
   --total_timesteps 300000 \
-  --n_envs 1
+  --n_envs 1 \
+  --run_name reward_shaping_seed42
 ```
 
-Le modèle final est sauvegardé par défaut dans :
+### 3.3 Curriculum learning
+
+```bash
+uv run python scripts/train_ppo_curriculum.py \
+  --task PnPCounterToCab \
+  --headless \
+  --curriculum_window 100 \
+  --curriculum_min_timesteps 50000 \
+  --curriculum_thresholds 0.70,0.80 \
+  --total_timesteps 300000 \
+  --n_envs 1 \
+  --run_name curriculum_seed42
+```
+
+## 4. Où sont stockés modèle / metrics / logs
+
+Par défaut, chaque run écrit dans :
 
 ```text
-models/<run_name>/ppo_final.zip
+models/<run_name>/
 ```
 
-## 4. Paramètres d'entraînement utiles
+Structure standard :
 
-- `--task` : nom de la tâche (actuellement `PnPCounterToCab`)
-- `--headless` : désactive le rendu temps réel
-- `--custom_reward_shaping` : active la récompense dense
-- `--total_timesteps` : nombre total de pas d'entraînement
-- `--n_envs` : nombre d'environnements parallèles
-- `--seed` : graine aléatoire
-- `--horizon` : longueur max d'un épisode
-- `--learning_rate` / `--batch_size` / `--n_steps` : hyperparamètres PPO
+```text
+models/<run_name>/
+├── ppo_final.zip
+└── logs/
+    ├── metrics.csv
+    ├── monitor/
+    │   └── env_0/monitor.csv
+    ├── tensorboard/
+    │   └── events.out.tfevents...
+```
 
-Paramètres de reward shaping (actifs avec `--custom_reward_shaping`) :
+Notes :
 
-- `--reach_w` : poids du terme d'approche de l'objet
-- `--grasp_bonus` : bonus de saisie
-- `--place_bonus` : bonus de placement dans la zone cible
-- `--success_bonus` : bonus final en cas de succès
+- Baseline, Reward Shaping et Curriculum écrivent tous `logs/metrics.csv` au même format.
+- Avec `--n_envs > 1`, `monitor/` contient `env_0`, `env_1`, etc.
+- `monitor.csv` enregistre par épisode : `r` (return), `l` (length), `t` (time).
+- `metrics.csv` est écrit à la fin de chaque rollout avec les colonnes :
+`timestep, ep_rew_mean, ep_len_mean, success_rate, n_episodes`.
 
-## 5. Évaluer un modèle
+## 5. Paramètres utiles
 
-Exemple :
+Paramètres communs :
+
+- `--headless`
+- `--seed`
+- `--horizon`
+- `--n_envs`
+- `--total_timesteps`
+- `--learning_rate`, `--batch_size`, `--n_steps`
+- `--model_dir` (par défaut `models`)
+- `--run_name`
+
+Paramètres reward shaping (`train_ppo_reward_shaping.py`) :
+
+- `--task` (actuellement `PnPCounterToCab`)
+- `--reach_w`, `--grasp_bonus`, `--place_bonus`, `--success_bonus`
+- `--device` / `--gpu`
+
+Paramètres curriculum (`train_ppo_curriculum.py`) :
+
+- `--task` (actuellement `PnPCounterToCab`)
+- `--device` / `--gpu`
+- `--curriculum_window`, `--curriculum_min_timesteps`, `--curriculum_thresholds`
+
+## 6. Évaluer un modèle
 
 ```bash
 uv run python scripts/eval_robocasa.py \
@@ -77,41 +127,24 @@ uv run python scripts/eval_robocasa.py \
   --save_video
 ```
 
-Si `--save_video` est activé, les vidéos sont écrites dans `eval_videos/`.
+Si `--save_video` est activé, les vidéos sont enregistrées dans `eval_videos/`.
 
-## 6. Problèmes fréquents (FAQ)
+## 7. FAQ rapide
 
-### Q1 : `No module named 'stable_baselines3'`
+### Q1. Pourquoi `total_timesteps=1000` finit à 2048 ?
 
-Le package n'est pas présent dans l'environnement courant. Exécutez :
+C'est normal avec PPO : l'apprentissage avance par blocs de rollout de taille `n_steps`
+(par défaut `2048`).
 
-```bash
-uv add stable-baselines3
-```
+### Q2. `metrics.csv` : rollout et episode, c'est la même chose ?
 
-Puis lancez avec `uv run python ...` pour éviter un mauvais interpréteur Python.
+Non.
 
-### Q2 : `AttributeError: 'NoneType' object has no attribute 'robot_model'`
+- Un **episode** = une trajectoire complète, de `reset()` à `done/truncated`.
+- Un **rollout** = un bloc de collecte PPO (taille `n_steps`, par défaut 2048 en single-env).
+- `metrics.csv` écrit **une ligne par rollout**, mais `ep_rew_mean`, `ep_len_mean`,
+`success_rate`, `n_episodes` sont calculés sur les episodes terminés du buffer SB3.
 
-C'est un problème d'ordre d'initialisation de l'environnement.  
-Dans ce dépôt, le script d'entraînement a déjà été corrigé (reset avant `GymWrapper`).
+### Q3. Warnings robosuite (macro / mimicgen / mink) ?
 
-### Q3 : Warnings robosuite (macro / mink / mimicgen)
-
-Ce sont souvent des avertissements non bloquants.  
-Si l'entraînement démarre et affiche les logs PPO, vous pouvez continuer.
-
-## 7. Workflow expérimental recommandé
-
-1. Tester d'abord avec `--total_timesteps 20000`  
-2. Vérifier que la récompense et le taux de succès montent  
-3. Augmenter ensuite à 300k / 500k / 1M  
-4. Comparer plusieurs seeds avec les meilleurs hyperparamètres
-
-## 8. Exemple de pipeline complet
-
-```bash
-uv run python scripts/train_robocasa.py --task PnPCounterToCab --headless --custom_reward_shaping --total_timesteps 300000 --n_envs 1
-uv run python scripts/eval_robocasa.py --task PnPCounterToCab --model_path models/<run_name>/ppo_final.zip --episodes 10 --save_video
-```
-
+Souvent non bloquants. Si l'entraînement démarre et produit les logs PPO, vous pouvez continuer.

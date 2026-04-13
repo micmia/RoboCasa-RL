@@ -58,7 +58,7 @@ class MetricsLoggerCallback(BaseCallback):
             self.csv_file.close()
             
 
-def make_env(args, rank):
+def make_env(args, rank, log_root):
     def _init():
         robots = "PandaOmron"
         controller_config = load_composite_controller_config(controller=None, robot=robots)
@@ -80,7 +80,7 @@ def make_env(args, rank):
         env = GymWrapper(env, keys=None)
         # ✂️ DIFF 1 : pas de AtomicRewardShapingWrapper ici
 
-        log_dir = os.path.join(args.log_root, f"env_{rank}")
+        log_dir = os.path.join(log_root, f"env_{rank}")
         os.makedirs(log_dir, exist_ok=True)
         env = Monitor(env, log_dir)
         env.reset(seed=args.seed + rank)
@@ -102,14 +102,24 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--n_steps", type=int, default=2048)
-    parser.add_argument("--log_root", type=str, default="/tmp/robocasa_rl_logs")
     parser.add_argument("--model_dir", type=str, default="models")
     parser.add_argument("--run_name", type=str, default="")
     # ✂️ DIFF 3 : pas de --custom_reward_shaping ni ses hyperparamètres
 
     args = parser.parse_args()
 
-    env_fns = [make_env(args, i) for i in range(args.n_envs)]
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name = args.run_name or f"baseline_PandaOmron_{timestamp}"
+    run_dir = os.path.join(args.model_dir, run_name)
+    os.makedirs(run_dir, exist_ok=True)
+
+    log_root = os.path.join(run_dir, "logs")
+    tensorboard_dir = os.path.join(log_root, "tensorboard")
+    monitor_root = os.path.join(log_root, "monitor")
+    os.makedirs(tensorboard_dir, exist_ok=True)
+    os.makedirs(monitor_root, exist_ok=True)
+
+    env_fns = [make_env(args, i, monitor_root) for i in range(args.n_envs)]
     env = SubprocVecEnv(env_fns) if args.n_envs > 1 else DummyVecEnv(env_fns)
 
     model = PPO(
@@ -120,17 +130,12 @@ def main():
         batch_size=args.batch_size,
         verbose=1,
         seed=args.seed,
-        tensorboard_log=args.log_root,
+        tensorboard_log=tensorboard_dir,
     )
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = args.run_name or f"baseline_PandaOmron_{timestamp}"
-    save_dir = os.path.join(args.model_dir, run_name)
-    os.makedirs(save_dir, exist_ok=True)
 
     #model.learn(total_timesteps=args.total_timesteps, progress_bar=True)
     metrics_cb = MetricsLoggerCallback(
-        log_path=os.path.join(args.log_root, "metrics.csv")
+        log_path=os.path.join(log_root, "metrics.csv")
     )
 
     model.learn(
@@ -138,7 +143,7 @@ def main():
         callback=metrics_cb,
         progress_bar=True,
     )
-    save_path = os.path.join(save_dir, "ppo_final")
+    save_path = os.path.join(run_dir, "ppo_final")
     model.save(save_path)
     env.close()
     print(f"Saved model to: {save_path}.zip")

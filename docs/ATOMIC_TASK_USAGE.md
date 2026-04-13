@@ -4,7 +4,7 @@ Ce document décrit le workflow pour entraîner et évaluer la tâche atomique *
 
 Pour le détail du flux (wrappers, récompense, curriculum), voir [`docs/ALGORITHM_FLOW.md`](ALGORITHM_FLOW.md).
 
-**Configuration `MyPnPCounterToCab` dans ce dépôt** : l’objet à manipuler est fixé à la pomme **`apple_1`** sur le plan de travail ; un distractor `bowl_1` peut être présent. La méthode `reward()` de cette classe renvoie **0** ; le signal utile pour PPO vient soit du **reward shaping** (`train_ppo_reward_shaping.py`), soit de la dynamique / exploration seule (baseline et curriculum).
+**Configuration `MyPnPCounterToCab` dans ce dépôt** : le **comptoir** (`counter`) est un meuble de cuisine ; **sur ce comptoir**, l’objet cible à manipuler est toujours la pomme **`apple_1`** (pas un tirage aléatoire dans la variante vanilla). Un distractor `bowl_1` peut être présent. La méthode `reward()` de cette classe renvoie **0** ; le signal utile pour PPO vient soit du **reward shaping** (`train_ppo_reward_shaping.py`), soit de la dynamique / exploration seule (baseline et curriculum).
 
 ---
 

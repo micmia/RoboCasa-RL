@@ -1,7 +1,12 @@
 # Guide d'utilisation des tâches atomiques RoboCasa (PandaOmron)
 
-Ce document décrit le workflow actuel pour entraîner et évaluer la tâche atomique
-`PnPCounterToCab` (sans navigation) avec PPO.
+Ce document décrit le workflow pour entraîner et évaluer la tâche atomique **`PnPCounterToCab`** (pick-and-place comptoir → placard, sans navigation) avec PPO (Stable-Baselines3).
+
+Pour le détail du flux (wrappers, récompense, curriculum), voir [`docs/ALGORITHM_FLOW.md`](ALGORITHM_FLOW.md).
+
+**Configuration `MyPnPCounterToCab` dans ce dépôt** : l’objet à manipuler est fixé à la pomme **`apple_1`** sur le plan de travail ; un distractor `bowl_1` peut être présent. La méthode `reward()` de cette classe renvoie **0** ; le signal utile pour PPO vient soit du **reward shaping** (`train_ppo_reward_shaping.py`), soit de la dynamique / exploration seule (baseline et curriculum).
+
+---
 
 ## 1. Préparer l'environnement
 
@@ -13,18 +18,23 @@ source .venv/bin/activate
 uv pip install -e .
 ```
 
-## 2. Scripts principaux (à jour)
+Python **≥ 3.11** (voir `pyproject.toml`).
 
-- Baseline (récompense native) : `scripts/train_ppo_baseline.py`
-- Reward shaping (sans curriculum) : `scripts/train_ppo_reward_shaping.py`
-- Curriculum learning (sans reward shaping custom) : `scripts/train_ppo_curriculum.py`
-- Évaluation : `scripts/eval_robocasa.py`
+---
 
-Configuration par défaut :
+## 2. Scripts principaux
 
-- Robot : `PandaOmron`
-- Tâche : `PnPCounterToCab`
-- Algo : `PPO` (Stable-Baselines3)
+| Script | Rôle |
+| ------ | ---- |
+| `scripts/train_ppo_baseline.py` | PPO sans `AtomicRewardShapingWrapper` |
+| `scripts/train_ppo_reward_shaping.py` | PPO + récompense dense custom (reach / grasp / place / success) |
+| `scripts/train_ppo_curriculum.py` | PPO + `CurriculumWrapper` + `SuccessInfoWrapper` (pas de shaping custom) |
+| `scripts/eval_robocasa.py` | Chargement de `ppo_final.zip`, épisodes, vidéo multi-caméras optionnelle |
+| `scripts/visualize_custom_env.py` | Aperçu interactif / caméras de `MyPnPCounterToCab` (hors PPO) |
+
+Configuration par défaut : robot **`PandaOmron`**, contrôle **`control_freq=20`**, horizon d’épisode **`500`** (sauf modification `--horizon`).
+
+---
 
 ## 3. Lancer l'entraînement
 
@@ -39,6 +49,8 @@ uv run python scripts/train_ppo_baseline.py \
 ```
 
 ### 3.2 Reward shaping
+
+`--task` doit rester **`PnPCounterToCab`** (seule valeur acceptée par ce script).
 
 ```bash
 uv run python scripts/train_ppo_reward_shaping.py \
@@ -63,15 +75,11 @@ uv run python scripts/train_ppo_curriculum.py \
   --run_name curriculum_seed42
 ```
 
+---
+
 ## 4. Où sont stockés modèle / metrics / logs
 
-Par défaut, chaque run écrit dans :
-
-```text
-models/<run_name>/
-```
-
-Structure standard :
+Par défaut, chaque run écrit sous **`models/<run_name>/`** (si `--run_name` est vide, un nom horodaté est généré).
 
 ```text
 models/<run_name>/
@@ -80,42 +88,45 @@ models/<run_name>/
     ├── metrics.csv
     ├── monitor/
     │   └── env_0/monitor.csv
-    ├── tensorboard/
-    │   └── events.out.tfevents...
+    └── tensorboard/
+        └── events.out.tfevents...
 ```
 
-Notes :
+**`--log_root`** : uniquement dans `train_ppo_reward_shaping.py` et `train_ppo_curriculum.py`. Si défini, remplace le répertoire `logs/` (les chemins TensorBoard / monitor / `metrics.csv` suivent ce préfixe). Le baseline utilise toujours `models/<run_name>/logs/`.
 
-- Baseline, Reward Shaping et Curriculum écrivent tous `logs/metrics.csv` au même format.
-- Avec `--n_envs > 1`, `monitor/` contient `env_0`, `env_1`, etc.
-- `monitor.csv` enregistre par épisode : `r` (return), `l` (length), `t` (time).
-- `metrics.csv` est écrit à la fin de chaque rollout avec les colonnes :
-`timestep, ep_rew_mean, ep_len_mean, success_rate, n_episodes`.
+Autres précisions :
+
+- Avec **`--n_envs > 1`**, `monitor/` contient `env_0`, `env_1`, …
+- `monitor.csv` : une ligne par épisode avec notamment `r` (return), `l` (longueur), `t` (temps).
+- `metrics.csv` : une ligne **à la fin de chaque rollout** PPO, colonnes  
+  `timestep, ep_rew_mean, ep_len_mean, success_rate, n_episodes`.  
+  La colonne `success_rate` lit `is_success` dans les stats d’épisode agrégées par SB3 ; selon les wrappers, elle peut rester à **0** même si la tâche progresse — le taux de succès fiable reste l’**évaluation** (`eval_robocasa.py`) ou un suivi TensorBoard selon votre configuration.
+
+---
 
 ## 5. Paramètres utiles
 
-Paramètres communs :
+**Communs** (baseline, shaping, curriculum) :
 
-- `--headless`
-- `--seed`
-- `--horizon`
-- `--n_envs`
-- `--total_timesteps`
+- `--headless`, `--seed`, `--horizon`, `--n_envs`, `--total_timesteps`
 - `--learning_rate`, `--batch_size`, `--n_steps`
-- `--model_dir` (par défaut `models`)
-- `--run_name`
+- `--model_dir` (défaut `models`), `--run_name`
 
-Paramètres reward shaping (`train_ppo_reward_shaping.py`) :
+**`train_ppo_reward_shaping.py` uniquement** :
 
-- `--task` (actuellement `PnPCounterToCab`)
-- `--reach_w`, `--grasp_bonus`, `--place_bonus`, `--success_bonus`
-- `--device` / `--gpu`
+- `--task` (`PnPCounterToCab` uniquement)
+- `--reach_reward`, `--grasp_reward`, `--place_reward`, `--success_reward` (défauts : `0.25`, `0.5`, `1.0`, `5.0`)
+- `--device`, `--gpu`, `--log_root`
 
-Paramètres curriculum (`train_ppo_curriculum.py`) :
+**`train_ppo_curriculum.py` uniquement** :
 
-- `--task` (actuellement `PnPCounterToCab`)
-- `--device` / `--gpu`
-- `--curriculum_window`, `--curriculum_min_timesteps`, `--curriculum_thresholds`
+- `--task` (`PnPCounterToCab`)
+- `--device`, `--gpu`, `--log_root`
+- `--curriculum_window`, `--curriculum_min_timesteps`, `--curriculum_thresholds` (liste séparée par des virgules)
+
+Le baseline n’expose pas **`--device` / `--gpu`** (appareil PyTorch laissé au défaut SB3, en pratique souvent CPU si non précisé ailleurs).
+
+---
 
 ## 6. Évaluer un modèle
 
@@ -127,24 +138,36 @@ uv run python scripts/eval_robocasa.py \
   --save_video
 ```
 
-Si `--save_video` est activé, les vidéos sont enregistrées dans `eval_videos/`.
+- **`--video_path`** (défaut `eval_videos`) : dossier racine des vidéos.
+- Avec `--save_video`, les fichiers vont sous **`eval_videos/<run_name>/`**, où `<run_name>` est le **nom du dossier parent** de `ppo_final.zip` (ex. `models/reward_shaping_seed42/ppo_final.zip` → `eval_videos/reward_shaping_seed42/<run_name>_ep_0.mp4`, …).
+
+Le retour cumulé à l’évaluation ne correspond pas nécessairement aux retours vus à l’entraînement avec reward shaping ; le **booléen de succès** affiché repose sur `_check_success()` de l’environnement brut.
+
+---
 
 ## 7. FAQ rapide
 
-### Q1. Pourquoi `total_timesteps=1000` finit à 2048 ?
+### Q1. Pourquoi `total_timesteps=1000` semble « sauter » à 2048 ?
 
-C'est normal avec PPO : l'apprentissage avance par blocs de rollout de taille `n_steps`
-(par défaut `2048`).
+C’est lié à PPO : la collecte se fait par rollouts de **`n_steps`** pas par environnement (défaut **2048**). Le premier `learn` peut donc dépasser légèrement la cible si elle est inférieure à `n_steps`.
 
-### Q2. `metrics.csv` : rollout et episode, c'est la même chose ?
+### Q2. Rollout et épisode, c’est la même chose ?
 
 Non.
 
-- Un **episode** = une trajectoire complète, de `reset()` à `done/truncated`.
-- Un **rollout** = un bloc de collecte PPO (taille `n_steps`, par défaut 2048 en single-env).
-- `metrics.csv` écrit **une ligne par rollout**, mais `ep_rew_mean`, `ep_len_mean`,
-`success_rate`, `n_episodes` sont calculés sur les episodes terminés du buffer SB3.
+- **Épisode** : de `reset()` jusqu’à `terminated` ou `truncated`.
+- **Rollout** : bloc de collecte PPO de taille `n_steps` (× nombre d’envs).
 
-### Q3. Warnings robosuite (macro / mimicgen / mink) ?
+`metrics.csv` ajoute **une ligne par rollout** ; les moyennes portent sur les épisodes terminés présents dans le buffer SB3 sur cette fenêtre.
 
-Souvent non bloquants. Si l'entraînement démarre et produit les logs PPO, vous pouvez continuer.
+### Q3. Warnings robosuite / dépendances ?
+
+Souvent non bloquants. Si l’entraînement démarre et que les logs PPO défilent, vous pouvez en général continuer.
+
+### Q4. Visualiser l’environnement sans entraîner ?
+
+```bash
+uv run python scripts/visualize_custom_env.py
+```
+
+(nécessite un affichage graphique ; voir le script pour les caméras et le rendu.)

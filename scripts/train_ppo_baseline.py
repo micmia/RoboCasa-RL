@@ -109,7 +109,7 @@ def main():
     args = parser.parse_args()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = args.run_name or f"baseline_PandaOmron_{timestamp}"
+    run_name = args.run_name or f"baseline_{timestamp}"
     run_dir = os.path.join(args.model_dir, run_name)
     os.makedirs(run_dir, exist_ok=True)
 

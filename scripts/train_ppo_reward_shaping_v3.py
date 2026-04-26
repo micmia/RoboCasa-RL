@@ -176,7 +176,11 @@ class ObservationAugmentWrapper(gym.Wrapper):
 
 
 class AtomicRewardShapingWrapper(gym.Wrapper):
-    """Phase-aware dense reward shaping: Reach → Grasp → Lift → Transport → Place into bowl."""
+    """Phase-aware dense reward shaping: Reach → Grasp → Lift → Transport → Place into bowl.
+
+    Each step returns sparse env reward plus dense shaping (curriculum-scaled, clipped),
+    with phase_cap optionally limiting which terms apply (e.g. lift-only pretraining).
+    """
 
     STRICT_GRASP_MIN_CONSECUTIVE = 1
     STRICT_GRASP_LIFT_M = 0.005
@@ -324,9 +328,11 @@ class AtomicRewardShapingWrapper(gym.Wrapper):
         return obs, info
 
     def step(self, action):
+        # Env sparse task reward + dense shaped term (curriculum-scaled). Returned reward is reward + shaped.
         obs, reward, terminated, truncated, info = self.env.step(action)
         self.global_step += 1
         self._episode_step += 1
+        # Ramps dense shaping from 0.3→1.0 over curriculum_steps so early training is not dominated by shaping.
         scale = self._curriculum_scale()
         raw_env = self._raw_env()
         shaped = 0.0
@@ -377,6 +383,7 @@ class AtomicRewardShapingWrapper(gym.Wrapper):
             pass
         grip_close = 1.0 - grip_open
 
+        # Require either slight object lift or stable finger closure + proximity so "brush contact" does not count as grasp.
         transportable = (
             height > self.STRICT_GRASP_LIFT_M
             or (
@@ -401,6 +408,7 @@ class AtomicRewardShapingWrapper(gym.Wrapper):
             shaped += scale * self.contact_reward
         self._ever_contacted = self._ever_contacted or bool(in_contact)
 
+        # --- Not grasped: reach / pre-grasp / gripper schedule, anti-cheese (premature lift, air-close), drop vs release ---
         if not grasped:
             if dist_eef_obj is not None:
                 if self._prev_dist_eef_obj is not None:
@@ -456,6 +464,7 @@ class AtomicRewardShapingWrapper(gym.Wrapper):
                     retraction = float(np.tanh(4.0 * max(0.0, dist_eef_obj - self.retraction_dist_m)))
                     shaped += scale * self.retraction_reward * retraction
 
+        # --- Grasped: first-grasp bonus, optional transport shaping, lift/hold/sustain, release-in-bowl ---
         else:
             self._prev_dist_eef_obj = None
 
@@ -494,6 +503,7 @@ class AtomicRewardShapingWrapper(gym.Wrapper):
             if inside_bowl:
                 shaped += scale * self.release_reward * grip_open
 
+        # --- Placement & success: full task gates place/success on contact; lift-only cap uses grasp+lift+env success ---
         if self.phase_cap != "lift":
             # Only credit placement if the agent actually contacted the object,
             # filtering out episodes where the apple spawned inside the bowl.
@@ -510,6 +520,7 @@ class AtomicRewardShapingWrapper(gym.Wrapper):
             if grasped and lifted and env_success:
                 shaped += self.success_reward
 
+        # L2 action norm: discourages jitter; subtracted after task terms so success spike still dominates when clip allows.
         try:
             shaped -= self.action_penalty_weight * float(np.linalg.norm(action))
         except Exception:
@@ -517,11 +528,13 @@ class AtomicRewardShapingWrapper(gym.Wrapper):
 
         if dist_eef_obj is not None:
             self._min_dist_eef_obj = min(self._min_dist_eef_obj, dist_eef_obj)
+        # Episode-level metric: stable "grasped while lifted" (used in info / callbacks, not added again as reward here).
         grasp_lifted = bool(grasped and lifted)
         shaped = float(np.clip(shaped, -self.reward_clip, self.reward_clip))
         self._ever_grasped = self._ever_grasped or bool(grasped)
         self._ever_grasp_lifted = self._ever_grasp_lifted or grasp_lifted
         self._ever_inside_bowl = self._ever_inside_bowl or (inside_bowl and self._ever_contacted)
+        # Logging: sparse vs dense split; flags mirror curriculum success criteria for analysis.
         info.update(
             sparse_reward=float(reward),
             dense_reward=float(shaped),

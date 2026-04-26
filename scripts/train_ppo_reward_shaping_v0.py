@@ -199,7 +199,7 @@ def main():
     train_device = "cuda" if args.gpu else args.device
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = args.run_name or f"reward_shaping_{timestamp}"
+    run_name = args.run_name or f"ppo_reward_shaping_v0_{timestamp}"
     run_dir = os.path.join(args.model_dir, run_name)
     os.makedirs(run_dir, exist_ok=True)
 

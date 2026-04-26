@@ -7,6 +7,7 @@ maintained implementation lives under `robocasa_rl/`.
 """
 
 from env.custom_pnp_counter_to_cab import MyPnPCounterToCab
+from env.custom_pnp_apple_to_bowl import MyPnPAppleToBowl
 
-__all__ = ["MyPnPCounterToCab"]
+__all__ = ["MyPnPCounterToCab", "MyPnPAppleToBowl"]
 

@@ -125,22 +125,17 @@ class AtomicRewardShapingWrapper(gym.Wrapper):
 
     Anti-exploitation design:
     - Reach reward is potential-based (progress-only), not absolute proximity.
+      This prevents "hover near object" exploitation.
     - No per-step hold reward. A one-time grasp transition bonus + drop penalty
       encourages maintaining grasp without making it infinitely farmable.
     - Transport potential delta is capped per step to prevent instability.
     - Success reward is not curriculum-scaled so it always dominates at the end.
-    - Premature lift: while not grasped, upward EEF motion is penalized unless
-      the gripper is very close AND already squeezing.
-    - Air-close: penalize near-closed gripper while still far from the object.
-    - Strict grasp: require raw contact+closed plus transportable evidence
-      (object lifted off table, or persistent tight contact over several steps).
+    - Premature lift: while not grasped, upward EEF motion is penalized unless the
+      gripper is both very close to the object and already squeezing (otherwise an
+      aligned-but-open gripper can still lift, as in eval ep_37).
+    - Air-close: penalize a nearly closed gripper while still far from the object
+      to discourage closing in the air before contact.
     """
-
-    # Strict-grasp thresholds (fixed to avoid CLI noise; tune here if needed).
-    STRICT_GRASP_MIN_CONSECUTIVE = 2     # steps of raw_grasped before "transportable"
-    STRICT_GRASP_LIFT_M = 0.008          # object lifted this far above table
-    STRICT_GRASP_FOLLOW_DIST_M = 0.045   # eef stays within this of object
-    STRICT_GRASP_MIN_CLOSE = 0.6         # grip_close in [0 open, 1 closed]
 
     def __init__(
         self,
@@ -210,9 +205,6 @@ class AtomicRewardShapingWrapper(gym.Wrapper):
         self._first_grasp_step = 0
         self._grasp_transitions = 0
         self._max_height = 0.0
-        self._ever_grasped = False
-        self._ever_inside_cab = False
-        self._raw_grasp_streak = 0
         self._cached_cab_pos = None      # cabinet position, fixed per episode
         self._prev_eef_z = None
 
@@ -241,9 +233,6 @@ class AtomicRewardShapingWrapper(gym.Wrapper):
         self._first_grasp_step = 0
         self._grasp_transitions = 0
         self._max_height = 0.0
-        self._ever_grasped = False
-        self._ever_inside_cab = False
-        self._raw_grasp_streak = 0
         self._cached_cab_pos = None
         self._prev_eef_z = None
         return self.env.reset(**kwargs)
@@ -274,15 +263,13 @@ class AtomicRewardShapingWrapper(gym.Wrapper):
             eef_pos = None
 
         # ---------- grasp state ----------
-        raw_grasped = False
+        grasped = False
         try:
-            raw_grasped = bool(OU.check_obj_grasped(raw_env, "obj"))
+            grasped = bool(OU.check_obj_grasped(raw_env, "obj"))
         except Exception:
             pass
-        self._raw_grasp_streak = self._raw_grasp_streak + 1 if raw_grasped else 0
 
         lifted = False
-        height = 0.0
         if obj_pos is not None:
             height = max(0.0, float(obj_pos[2]) - self.table_height)
             self._max_height = max(self._max_height, float(height))
@@ -300,19 +287,6 @@ class AtomicRewardShapingWrapper(gym.Wrapper):
             pass
         grip_close = 1.0 - grip_open
 
-        # Strict grasp: object either slightly lifted, or gripper has held it
-        # tight and followed it for several consecutive steps.
-        transportable = (
-            height > self.STRICT_GRASP_LIFT_M
-            or (
-                self._raw_grasp_streak >= self.STRICT_GRASP_MIN_CONSECUTIVE
-                and dist_eef_obj is not None
-                and dist_eef_obj < self.STRICT_GRASP_FOLLOW_DIST_M
-                and grip_close >= self.STRICT_GRASP_MIN_CLOSE
-            )
-        )
-        grasped = bool(raw_grasped and transportable)
-
         # ============================================================
         # Phase-based reward (anti-exploitation design)
         # ============================================================
@@ -320,13 +294,16 @@ class AtomicRewardShapingWrapper(gym.Wrapper):
             # ---- Phase 1: Reach (potential-based, no hovering incentive) ----
             if dist_eef_obj is not None:
                 if self._prev_dist_eef_obj is not None:
+                    # Reward progress toward object; small asymmetric penalty for backing off.
+                    # Scale by 20 so a typical 0.01 m/step approach gives ~0.2 reward.
                     delta = self._prev_dist_eef_obj - dist_eef_obj
                     reach_progress = float(np.clip(delta * 20.0, -0.5, 1.0))
                     shaped += scale * self.reach_reward * reach_progress
                 self._prev_dist_eef_obj = dist_eef_obj
-                self._prev_dist_obj_cab = None
+                self._prev_dist_obj_cab = None  # transport tracker irrelevant now
 
-                # ---- Phase 2: Pre-grasp proximity bonus (< 5 cm) ----
+                # ---- Phase 2: Pre-grasp proximity bonus ----
+                # Small bonus when very close to object (< 5 cm) to encourage final closure.
                 if dist_eef_obj < 0.05:
                     proximity = 1.0 - dist_eef_obj / 0.05
                     shaped += scale * self.pre_grasp_reward * proximity
@@ -345,8 +322,8 @@ class AtomicRewardShapingWrapper(gym.Wrapper):
                     shaped += scale * self.gripper_open_reward * (1.0 - alpha) * grip_open
                     shaped += scale * self.gripper_close_reward * alpha * grip_close
 
-                # ---- Penalize raising the arm before grasp ----
-                # Exempt only when very close AND fingers are clearly closing.
+                # ---- Penalize raising the arm before grasp (ep_37: aligned over apple but still open) ----
+                # Exempt only when very close AND fingers are clearly closing; distance alone is not enough.
                 close_and_squeezing = (dist_eef_obj < self.premature_lift_dist_m) and (
                     grip_close >= self.premature_lift_exempt_grip_close
                 )
@@ -360,23 +337,23 @@ class AtomicRewardShapingWrapper(gym.Wrapper):
                             * dz
                         )
 
-                # ---- Discourage closing gripper in the air before contact ----
+                # ---- Discourage closing the gripper in the air before contact ----
                 if grip_close > self.air_close_grip_threshold and dist_eef_obj > self.air_close_dist_m:
                     shaped -= scale * self.air_close_penalty
 
-            # Object off the table but not grasped (scooping/accidental lift).
+            # Object clearly off the table but still not counted as grasped (e.g. scooping).
             if lifted:
                 shaped -= scale * self.ungrasped_object_lift_penalty
 
-            # ---- Drop penalty: was grasped last step, not now (non-scaled) ----
+            # ---- Drop penalty: was grasped last step, not now ----
             if self._prev_grasped:
                 shaped -= self.drop_penalty
 
         else:
-            # ---- Phase 3+: Grasped (reach tracker no longer needed) ----
-            self._prev_dist_eef_obj = None
+            # ---- Phase 3+: Grasped ----
+            self._prev_dist_eef_obj = None  # reach tracking no longer needed
 
-            # One-time grasp transition bonus.
+            # One-time grasp transition bonus (only on first step of grasp).
             if not self._prev_grasped:
                 shaped += scale * self.grasp_reward
                 self._grasp_transitions += 1
@@ -386,16 +363,17 @@ class AtomicRewardShapingWrapper(gym.Wrapper):
             if not lifted:
                 # ---- Phase 3: Lift ----
                 if obj_pos is not None:
-                    shaped += scale * self.lift_reward * min(
-                        1.0, height / max(1e-6, self.lift_threshold)
-                    )
+                    height = max(0.0, float(obj_pos[2]) - self.table_height)
+                    shaped += scale * self.lift_reward * min(1.0, height / max(1e-6, self.lift_threshold))
             else:
                 # ---- Phase 4: Transport (potential-based + dense) ----
                 cab_pos = self._cabinet_pos_cached(raw_env)
                 if cab_pos is not None and obj_pos is not None:
                     dist_obj_cab = float(np.linalg.norm(obj_pos - cab_pos))
+                    # Dense component: coef=0.8 so useful signal at 1 m (1-tanh(0.8)≈0.33).
                     transport_dense = float(1.0 - np.tanh(0.8 * dist_obj_cab))
                     shaped += scale * self.transport_reward * 0.5 * transport_dense
+                    # Potential component: reward per-step progress toward cabinet, capped per step.
                     if self._prev_dist_obj_cab is not None:
                         delta_cab = self._prev_dist_obj_cab - dist_obj_cab
                         transport_progress = float(np.clip(delta_cab * 10.0, -0.5, 1.0))
@@ -410,12 +388,15 @@ class AtomicRewardShapingWrapper(gym.Wrapper):
             inside_cab = bool(OU.obj_inside_of(raw_env, "obj", "cab", partial_check=True, th=0.0))
         except Exception:
             inside_cab = False
+        # One-time place bonus on first entry into cabinet region.
         if inside_cab and not self._prev_inside_cab:
-            shaped += scale * self.place_reward                  # one-time place bonus
+            shaped += scale * self.place_reward
+        # When inside cabinet and still holding object, encourage opening the gripper to release.
         if inside_cab and grasped:
-            shaped += scale * self.release_reward * grip_open    # encourage release
+            shaped += scale * self.release_reward * grip_open
         if info.get("success", False):
-            shaped += self.success_reward                        # always dominant
+            # Not curriculum-scaled — always the dominant terminal signal.
+            shaped += self.success_reward
 
         # ---- Action smoothness penalty ----
         try:
@@ -424,21 +405,14 @@ class AtomicRewardShapingWrapper(gym.Wrapper):
             pass
 
         shaped = float(np.clip(shaped, -self.reward_clip, self.reward_clip))
-        self._ever_grasped = self._ever_grasped or bool(grasped)
-        self._ever_inside_cab = self._ever_inside_cab or bool(inside_cab)
-        info.update(
-            sparse_reward=float(reward),
-            dense_reward=float(shaped),
-            grasped=bool(grasped),
-            raw_grasped=bool(raw_grasped),
-            lifted=bool(lifted),
-            inside_cab=bool(inside_cab),
-            first_grasp_step=int(self._first_grasp_step),
-            grasp_transitions=int(self._grasp_transitions),
-            max_height=float(self._max_height),
-            grasp_success=float(self._ever_grasped),
-            place_success=float(self._ever_inside_cab),
-        )
+        info["sparse_reward"] = float(reward)
+        info["dense_reward"] = float(shaped)
+        info["grasped"] = grasped
+        info["lifted"] = lifted
+        info["inside_cab"] = bool(inside_cab)
+        info["first_grasp_step"] = int(self._first_grasp_step)
+        info["grasp_transitions"] = int(self._grasp_transitions)
+        info["max_height"] = float(self._max_height)
         self._prev_grasped = bool(grasped)
         self._prev_inside_cab = bool(inside_cab)
         if eef_pos is not None:
@@ -465,8 +439,6 @@ class MetricsLoggerCallback(BaseCallback):
                 "ep_rew_mean",
                 "ep_len_mean",
                 "success_rate",
-                "grasp_success_rate",
-                "place_success_rate",
                 "first_grasp_step_mean",
                 "grasp_transitions_mean",
                 "max_height_mean",
@@ -481,8 +453,6 @@ class MetricsLoggerCallback(BaseCallback):
         ep_rews = [ep["r"] for ep in self.model.ep_info_buffer]
         ep_lens = [ep["l"] for ep in self.model.ep_info_buffer]
         successes = [ep.get("success", ep.get("is_success", 0)) for ep in self.model.ep_info_buffer]
-        grasp_successes = [ep.get("grasp_success", 0.0) for ep in self.model.ep_info_buffer]
-        place_successes = [ep.get("place_success", 0.0) for ep in self.model.ep_info_buffer]
         first_grasp_steps = [ep.get("first_grasp_step", 0) for ep in self.model.ep_info_buffer]
         grasp_transitions = [ep.get("grasp_transitions", 0) for ep in self.model.ep_info_buffer]
         max_heights = [ep.get("max_height", 0.0) for ep in self.model.ep_info_buffer]
@@ -492,8 +462,6 @@ class MetricsLoggerCallback(BaseCallback):
                 "ep_rew_mean": float(np.mean(ep_rews)),
                 "ep_len_mean": float(np.mean(ep_lens)),
                 "success_rate": float(np.mean(successes)),
-                "grasp_success_rate": float(np.mean(grasp_successes)),
-                "place_success_rate": float(np.mean(place_successes)),
                 "first_grasp_step_mean": float(np.mean(first_grasp_steps)),
                 "grasp_transitions_mean": float(np.mean(grasp_transitions)),
                 "max_height_mean": float(np.mean(max_heights)),
@@ -570,14 +538,7 @@ def make_env(args, rank, monitor_root):
         env = Monitor(
             env,
             log_dir,
-            info_keywords=(
-                "success",
-                "grasp_success",
-                "place_success",
-                "first_grasp_step",
-                "grasp_transitions",
-                "max_height",
-            ),
+            info_keywords=("success", "first_grasp_step", "grasp_transitions", "max_height"),
         )
         env.reset(seed=args.seed + rank)
         return env
@@ -689,7 +650,7 @@ def main():
 
     train_device = args.device
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = args.run_name or f"reward_shaping_{timestamp}"
+    run_name = args.run_name or f"ppo_reward_shaping_v1_{timestamp}"
     run_dir = os.path.join(args.model_dir, run_name)
     os.makedirs(run_dir, exist_ok=True)
 

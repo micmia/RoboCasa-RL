@@ -10,6 +10,7 @@ from env.custom_pnp_counter_to_cab import MyPnPCounterToCab
 
 import argparse
 import csv
+import json
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -20,7 +21,7 @@ from robocasa.utils import object_utils as OU
 from robosuite.controllers import load_composite_controller_config
 from robosuite.wrappers.gym_wrapper import GymWrapper
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList, CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
@@ -139,12 +140,17 @@ class DenseStrictRewardWrapper(gym.Wrapper):
         # reward weights
         w_reach: float = 0.25,
         w_grasp: float = 0.35,
+        w_hold: float = 0.25,
+        w_close_near: float = 0.15,
+        w_open_contact_penalty: float = 0.25,
         w_lift: float = 0.20,
         w_carry: float = 0.35,
         w_inside: float = 0.75,
         w_success: float = 5.0,
         reach_temp: float = 4.0,
         carry_temp: float = 4.0,
+        close_near_dist_m: float = 0.05,
+        hold_max_steps: int = 50,
     ):
         super().__init__(env)
         self.target = str(target)
@@ -152,17 +158,23 @@ class DenseStrictRewardWrapper(gym.Wrapper):
 
         self.w_reach = float(w_reach)
         self.w_grasp = float(w_grasp)
+        self.w_hold = float(w_hold)
+        self.w_close_near = float(w_close_near)
+        self.w_open_contact_penalty = float(w_open_contact_penalty)
         self.w_lift = float(w_lift)
         self.w_carry = float(w_carry)
         self.w_inside = float(w_inside)
         self.w_success = float(w_success)
         self.reach_temp = float(reach_temp)
         self.carry_temp = float(carry_temp)
+        self.close_near_dist_m = float(close_near_dist_m)
+        self.hold_max_steps = int(max(int(hold_max_steps), 1))
 
         # streaks / baselines (set on reset)
         self._obj_z0 = 0.0
         self._raw_grasp_streak = 0
         self._inside_streak = 0
+        self._prev_grip_close = 0.0
 
     def _raw_env(self):
         cur = self.env
@@ -179,6 +191,7 @@ class DenseStrictRewardWrapper(gym.Wrapper):
             self._obj_z0 = 0.0
         self._raw_grasp_streak = 0
         self._inside_streak = 0
+        self._prev_grip_close = 0.0
         return obs, info
 
     def _target_center(self, raw_env) -> np.ndarray | None:
@@ -272,6 +285,24 @@ class DenseStrictRewardWrapper(gym.Wrapper):
             )
         )
         grasped = bool(raw_grasped and transportable)
+
+        # 1) hold: reward maintaining grasp across time (streak-based)
+        hold_frac = float(np.clip(float(self._raw_grasp_streak) / float(self.hold_max_steps), 0.0, 1.0))
+        shaped_terms["hold"] = self.w_hold * hold_frac
+
+        # 2) close-while-near: encourage closing when close to object (even before grasp)
+        if dist_eef_obj is not None and self.close_near_dist_m > 0:
+            near = float(np.clip(1.0 - (dist_eef_obj / self.close_near_dist_m), 0.0, 1.0))
+            shaped_terms["close_near"] = self.w_close_near * near * float(grip_close)
+        else:
+            shaped_terms["close_near"] = 0.0
+
+        # 3) anti-open-under-contact: penalize opening once contact/grasp has begun
+        # grip_close decreases when opening (since 1.0 = closed).
+        open_amount = float(max(0.0, float(self._prev_grip_close) - float(grip_close)))
+        in_contact_regime = bool(raw_grasped or (self._raw_grasp_streak > 0))
+        shaped_terms["open_contact_penalty"] = -self.w_open_contact_penalty * float(in_contact_regime) * open_amount
+        self._prev_grip_close = float(grip_close)
 
         shaped_terms["grasp"] = self.w_grasp * float(grasped)
         shaped_terms["lift"] = self.w_lift * float(np.clip(height / max(self.cfg.grasp_lift_m, 1e-6), 0.0, 1.0))
@@ -369,6 +400,51 @@ class MetricsLoggerCallback(BaseCallback):
             self.csv_file.close()
 
 
+class RolloutDebugLoggerCallback(BaseCallback):
+    """
+    Logs means of selected `info` fields to TensorBoard (debug/*).
+    This is intentionally lightweight and aggregated over rollouts.
+    """
+
+    def __init__(self, verbose=0):
+        super().__init__(verbose=verbose)
+        self._buf: dict[str, list[float]] = {}
+
+    def _push(self, key: str, val: float) -> None:
+        self._buf.setdefault(key, []).append(float(val))
+
+    def _on_step(self) -> bool:
+        infos = self.locals.get("infos")
+        if not isinstance(infos, (list, tuple)):
+            return True
+        for info in infos:
+            if not isinstance(info, dict):
+                continue
+            # scalar debug
+            for k in ("dense_reward", "sparse_reward", "obj_height", "obj_speed", "grip_close"):
+                if k in info:
+                    self._push(k, float(info[k]))
+            for k in ("raw_grasped", "strict_grasped", "inside_target", "success"):
+                if k in info:
+                    self._push(k, 1.0 if bool(info[k]) else 0.0)
+            # per-term shaping
+            terms = info.get("dense_terms")
+            if isinstance(terms, dict):
+                for tk, tv in terms.items():
+                    try:
+                        self._push(f"dense_terms/{tk}", float(tv))
+                    except Exception:
+                        pass
+        return True
+
+    def _on_rollout_end(self) -> None:
+        for k, vals in list(self._buf.items()):
+            if not vals:
+                continue
+            self.logger.record(f"debug/{k}", float(np.mean(vals)))
+        self._buf.clear()
+
+
 def make_env(args, rank, monitor_root):
     def _init():
         if args.task != "PnPCounterToCab":
@@ -411,12 +487,17 @@ def make_env(args, rank, monitor_root):
             strict_cfg=strict_cfg,
             w_reach=args.w_reach,
             w_grasp=args.w_grasp,
+            w_hold=args.w_hold,
+            w_close_near=args.w_close_near,
+            w_open_contact_penalty=args.w_open_contact_penalty,
             w_lift=args.w_lift,
             w_carry=args.w_carry,
             w_inside=args.w_inside,
             w_success=args.w_success,
             reach_temp=args.reach_temp,
             carry_temp=args.carry_temp,
+            close_near_dist_m=args.close_near_dist_m,
+            hold_max_steps=args.hold_max_steps,
         )
 
         log_dir = os.path.join(monitor_root, f"env_{rank}")
@@ -426,6 +507,58 @@ def make_env(args, rank, monitor_root):
         return env
 
     return _init
+
+
+def make_eval_env(args):
+    robots = "PandaOmron"
+    controller_config = load_composite_controller_config(controller=None, robot=robots)
+    env = MyPnPCounterToCab(
+        robots=robots,
+        controller_configs=controller_config,
+        use_camera_obs=False,
+        has_renderer=False,
+        has_offscreen_renderer=False,
+        reward_shaping=True,
+        control_freq=20,
+        renderer="mjviewer",
+        ignore_done=False,
+        seed=args.seed + 10_000,
+        horizon=args.horizon,
+    )
+    env.reset()
+    env = GymWrapper(env, keys=None)
+
+    strict_cfg = StrictStateCfg(
+        grasp_lift_m=args.strict_grasp_lift_m,
+        grasp_min_consecutive=args.strict_grasp_min_consecutive,
+        grasp_follow_dist_m=args.strict_grasp_follow_dist_m,
+        gripper_open_qpos=args.strict_gripper_open_qpos,
+        grasp_min_close=args.strict_grasp_min_close,
+        inside_min_consecutive=args.strict_inside_min_consecutive,
+        inside_max_obj_speed=args.strict_inside_max_obj_speed,
+        inside_require_release=(not args.allow_inside_while_grasped),
+    )
+
+    env = DenseStrictRewardWrapper(
+        env,
+        target=args.target,
+        strict_cfg=strict_cfg,
+        w_reach=args.w_reach,
+        w_grasp=args.w_grasp,
+        w_hold=args.w_hold,
+        w_close_near=args.w_close_near,
+        w_open_contact_penalty=args.w_open_contact_penalty,
+        w_lift=args.w_lift,
+        w_carry=args.w_carry,
+        w_inside=args.w_inside,
+        w_success=args.w_success,
+        reach_temp=args.reach_temp,
+        carry_temp=args.carry_temp,
+        close_near_dist_m=args.close_near_dist_m,
+        hold_max_steps=args.hold_max_steps,
+    )
+    env = Monitor(env)
+    return env
 
 
 def main():
@@ -439,6 +572,21 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--n_steps", type=int, default=2048)
+    parser.add_argument("--resume_from", type=str, default=None, help="Optional path to a .zip model checkpoint to resume from.")
+    parser.add_argument(
+        "--checkpoint_freq",
+        type=int,
+        default=0,
+        help="Save a checkpoint every N timesteps (0 disables).",
+    )
+    parser.add_argument(
+        "--best_eval_freq",
+        type=int,
+        default=0,
+        help="Run eval every N timesteps and save best_model.zip (0 disables).",
+    )
+    parser.add_argument("--best_eval_episodes", type=int, default=5)
+    parser.add_argument("--log_debug", action="store_true", help="Log debug/* metrics to TensorBoard from info dicts.")
     parser.add_argument(
         "--log_root",
         type=str,
@@ -462,12 +610,17 @@ def main():
     # Dense weights (clear decomposition)
     parser.add_argument("--w_reach", type=float, default=0.25)
     parser.add_argument("--w_grasp", type=float, default=0.35)
+    parser.add_argument("--w_hold", type=float, default=0.25)
+    parser.add_argument("--w_close_near", type=float, default=0.15)
+    parser.add_argument("--w_open_contact_penalty", type=float, default=0.25)
     parser.add_argument("--w_lift", type=float, default=0.20)
     parser.add_argument("--w_carry", type=float, default=0.35)
     parser.add_argument("--w_inside", type=float, default=0.75)
     parser.add_argument("--w_success", type=float, default=5.0)
     parser.add_argument("--reach_temp", type=float, default=4.0)
     parser.add_argument("--carry_temp", type=float, default=4.0)
+    parser.add_argument("--close_near_dist_m", type=float, default=0.05)
+    parser.add_argument("--hold_max_steps", type=int, default=50)
 
     # Strict grasp gates (your idea, made configurable)
     parser.add_argument("--strict_grasp_lift_m", type=float, default=0.015)
@@ -495,23 +648,64 @@ def main():
     os.makedirs(tensorboard_dir, exist_ok=True)
     os.makedirs(monitor_root, exist_ok=True)
 
+    with open(os.path.join(run_dir, "config.json"), "w") as f:
+        json.dump(vars(args), f, indent=2, sort_keys=True)
+
     env_fns = [make_env(args, i, monitor_root) for i in range(args.n_envs)]
     env = SubprocVecEnv(env_fns) if args.n_envs > 1 else DummyVecEnv(env_fns)
 
-    model = PPO(
-        policy="MlpPolicy",
-        env=env,
-        learning_rate=args.learning_rate,
-        n_steps=args.n_steps,
-        batch_size=args.batch_size,
-        verbose=1,
-        seed=args.seed,
-        tensorboard_log=tensorboard_dir,
-        device=train_device,
-    )
+    if args.resume_from:
+        model = PPO.load(args.resume_from, env=env, device=train_device, print_system_info=True)
+        model.tensorboard_log = tensorboard_dir
+        reset_num_timesteps = False
+    else:
+        model = PPO(
+            policy="MlpPolicy",
+            env=env,
+            learning_rate=args.learning_rate,
+            n_steps=args.n_steps,
+            batch_size=args.batch_size,
+            verbose=1,
+            seed=args.seed,
+            tensorboard_log=tensorboard_dir,
+            device=train_device,
+        )
+        reset_num_timesteps = True
 
-    callback = MetricsLoggerCallback(log_path=os.path.join(log_root, "metrics.csv"))
-    model.learn(total_timesteps=args.total_timesteps, progress_bar=True, callback=callback)
+    callbacks: list[BaseCallback] = [MetricsLoggerCallback(log_path=os.path.join(log_root, "metrics.csv"))]
+    if args.log_debug:
+        callbacks.append(RolloutDebugLoggerCallback())
+    if int(args.checkpoint_freq) > 0:
+        ckpt_dir = os.path.join(run_dir, "checkpoints")
+        os.makedirs(ckpt_dir, exist_ok=True)
+        save_freq = max(1, int(args.checkpoint_freq) // max(int(args.n_envs), 1))
+        callbacks.append(CheckpointCallback(save_freq=save_freq, save_path=ckpt_dir, name_prefix="ppo"))
+    if int(args.best_eval_freq) > 0:
+        eval_env = DummyVecEnv([lambda: make_eval_env(args)])
+        best_dir = os.path.join(run_dir, "best")
+        os.makedirs(best_dir, exist_ok=True)
+        eval_log = os.path.join(log_root, "eval")
+        os.makedirs(eval_log, exist_ok=True)
+        eval_freq = max(1, int(args.best_eval_freq) // max(int(args.n_envs), 1))
+        callbacks.append(
+            EvalCallback(
+                eval_env,
+                best_model_save_path=best_dir,
+                log_path=eval_log,
+                eval_freq=eval_freq,
+                n_eval_episodes=int(args.best_eval_episodes),
+                deterministic=True,
+                render=False,
+            )
+        )
+
+    callback = CallbackList(callbacks)
+    model.learn(
+        total_timesteps=args.total_timesteps,
+        progress_bar=True,
+        callback=callback,
+        reset_num_timesteps=reset_num_timesteps,
+    )
     save_path = os.path.join(run_dir, "ppo_final")
     model.save(save_path)
     env.close()

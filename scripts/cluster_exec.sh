@@ -89,7 +89,10 @@ if [[ ${#matches[@]} -eq 0 ]]; then
   ls -1t runs/slurm 2>/dev/null | head -n 20 >&2 || true
   exit 1
 fi
-cat "${matches[0]}"
+f="${matches[0]}"
+bytes="$(stat -c '%s' "$f" 2>/dev/null || echo '?')"
+echo "==> ${REMOTE_PATH}/${f} (${bytes} bytes)"
+cat "$f"
 EOS
     ;;
   cancel)

@@ -52,7 +52,7 @@ flowchart LR
 
 ### 3.1 Couche basse (RoboCasa / `reward` personnalisé)
 
-`MyPnPCounterToCab.reward()` renvoie actuellement `0` ; le succès de la tâche est défini par `_check_success()` (objet dans le placard et pince éloignée de l’objet). Pour retrouver le comportement RoboCasa par défaut, vous pouvez dans la sous-classe appeler la classe parente ou utiliser explicitement `float(_check_success())`.
+`MyPnPCounterToCab.reward()` renvoie `float(_check_success())` (récompense **sparse** 0/1, comme `Kitchen` dans RoboCasa). Le succès est défini par `_check_success()` (objet dans le placard et pince éloignée de l’objet).
 
 ### 3.2 Avec `--custom_reward_shaping` activé
 

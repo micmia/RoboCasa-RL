@@ -1,9 +1,6 @@
 """
-Custom PnPCounterToCab environment with modified reward function.
-
-This class inherits from the original RoboCasa PnPCounterToCab environment
-and allows you to customize the reward function without modifying the
-original robocasa or skrl packages.
+Custom PnPCounterToCab: fixed kitchen layout, curriculum hooks, and sparse
+success-based reward, without forking the upstream `robocasa` package.
 
 Usage:
     from env import MyPnPCounterToCab
@@ -46,11 +43,9 @@ import numpy as np
 
 class MyPnPCounterToCab(PickPlaceCounterToCabinet):
     """
-    PnPCounterToCab environment with modified reward function.
-    
-    This class inherits from the original PickPlaceCounterToCabinet and overrides
-    the reward() method to implement a custom reward function.
-    
+    PnPCounterToCab with a fixed kitchen layout, curriculum hooks, and sparse
+    success reward (`float(_check_success())`) so RL agents receive a non-zero
+    learning signal. Use `train_ppo_reward_shaping` for additional dense terms.
     """
     
     def __init__(self, *args, **kwargs):
@@ -215,9 +210,8 @@ class MyPnPCounterToCab(PickPlaceCounterToCabinet):
         return sampler
         
     def reward(self, action=None):
-        r = 0
-
-        return r
+        """Sparse 0/1 on task success (same contract as `Kitchen.reward`)."""
+        return float(self._check_success())
  
 
 # Example of how to register this environment with robosuite if needed

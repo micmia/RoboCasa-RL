@@ -9,6 +9,7 @@ from datetime import datetime
 
 import gymnasium as gym
 import numpy as np
+from robocasa.utils import object_utils as OU
 from robosuite.controllers import load_composite_controller_config
 from robosuite.wrappers.gym_wrapper import GymWrapper
 from stable_baselines3 import PPO
@@ -19,6 +20,66 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from env.curriculum import CurriculumWrapper
 from env.custom_pnp_counter_to_cab import MyPnPCounterToCab
+
+
+class AtomicRewardShapingWrapper(gym.Wrapper):
+    """Adds dense reward terms and success signal (reach / grasp / place / success)."""
+
+    def __init__(self, env, reach_reward=0.25, grasp_reward=0.5, place_reward=1.0, success_reward=5.0):
+        super().__init__(env)
+        self.reach_reward = float(reach_reward)
+        self.grasp_reward = float(grasp_reward)
+        self.place_reward = float(place_reward)
+        self.success_reward = float(success_reward)
+
+    def _raw_env(self):
+        cur = self.env
+        while hasattr(cur, "env"):
+            cur = cur.env
+        return cur
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        raw_env = self._raw_env()
+
+        shaped = 0.0
+        try:
+            info["success"] = bool(raw_env._check_success())
+        except Exception:
+            info.setdefault("success", False)
+
+        # Reach
+        try:
+            obj_pos = raw_env.sim.data.body_xpos[raw_env.obj_body_id["obj"]]
+            eef_pos = raw_env.sim.data.site_xpos[raw_env.robots[0].eef_site_id["right"]]
+            shaped += self.reach_reward * float(np.exp(-4.0 * np.linalg.norm(eef_pos - obj_pos)))
+        except Exception:
+            pass
+
+        # Grasp
+        try:
+            if OU.check_obj_grasped(raw_env, "obj"):
+                shaped += self.grasp_reward
+        except Exception:
+            pass
+
+        # Place
+        try:
+            if OU.obj_inside_of(raw_env, "obj", "cab", partial_check=True, th=0.0):
+                shaped += self.place_reward
+        except Exception:
+            pass
+
+        # Success
+        try:
+            if bool(raw_env._check_success()):
+                shaped += self.success_reward
+        except Exception:
+            pass
+
+        info["sparse_reward"] = float(reward)
+        info["dense_reward"] = float(shaped)
+        return obs, float(reward + shaped), terminated, truncated, info
 
 
 class SuccessInfoWrapper(gym.Wrapper):
@@ -154,6 +215,13 @@ def make_env(args, rank, monitor_root):
         env.reset()
         env = CurriculumWrapper(env, initial_stage=0)
         env = GymWrapper(env, keys=None)
+        env = AtomicRewardShapingWrapper(
+            env,
+            reach_reward=args.reach_reward,
+            grasp_reward=args.grasp_reward,
+            place_reward=args.place_reward,
+            success_reward=args.success_reward,
+        )
         env = SuccessInfoWrapper(env)
         log_dir = os.path.join(monitor_root, f"env_{rank}")
         os.makedirs(log_dir, exist_ok=True)
@@ -183,6 +251,10 @@ def main():
     parser.add_argument("--curriculum_window", type=int, default=100)
     parser.add_argument("--curriculum_min_timesteps", type=int, default=50_000)
     parser.add_argument("--curriculum_thresholds", type=str, default="0.70,0.80")
+    parser.add_argument("--reach_reward", type=float, default=0.25)
+    parser.add_argument("--grasp_reward", type=float, default=0.5)
+    parser.add_argument("--place_reward", type=float, default=1.0)
+    parser.add_argument("--success_reward", type=float, default=5.0)
     args = parser.parse_args()
 
     train_device = "cuda" if args.gpu else args.device

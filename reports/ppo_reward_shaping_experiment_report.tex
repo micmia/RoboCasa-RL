@@ -1,0 +1,193 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{geometry}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\geometry{margin=1in}
+
+\title{Coursework Report: PPO with Reward Shaping in RoboCasa Manipulation Tasks}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This report studies Proximal Policy Optimization (PPO) with reward shaping for two robotic manipulation tasks in RoboCasa: \textit{apple-to-cabinet} and \textit{apple-to-bowl}. The goal is to analyze how dense shaping terms affect learning progress and policy behavior, especially in long-horizon sparse-reward settings. Experiments are run with Stable-Baselines3 PPO and task-specific wrappers that expose success-related sub-metrics. Results show that reward shaping is necessary to avoid complete learning collapse, but also introduces local optima where the robot learns to grasp and hover near target regions without consistently finishing placement and release.
+\end{abstract}
+
+\section{Introduction}
+Sparse-reward robotic manipulation remains challenging because meaningful learning signals are rare and delayed. In long-horizon pick-and-place tasks, PPO may learn slowly or collapse to ineffective exploration when only terminal success is rewarded. Reward shaping addresses this issue by introducing intermediate objectives aligned with task progress.
+
+This report studies PPO with reward shaping in two RoboCasa tasks and evaluates how shaping design affects (i) subskill acquisition and (ii) end-to-end success.
+
+\section{Problem Formulation}
+\subsection{Tasks}
+We consider two related manipulation tasks:
+\begin{itemize}
+    \item \textbf{Apple-to-Cabinet (apple-to-cab):} pick an apple from a counter and place it into a cabinet region.
+    \item \textbf{Apple-to-Bowl (apple-to-bowl):} pick an apple from a counter and place it into a bowl.
+\end{itemize}
+
+\subsection{Success Criteria and Transfer Challenge}
+The two tasks share a pick-transport-place structure, but differ in terminal constraints. The bowl task requires both successful placement and gripper disengagement, making release behavior critical. As a result, policies transferred from apple-to-cab may preserve grasp and transport skills yet still underperform on final success in apple-to-bowl.
+
+\section{Method}
+\subsection{PPO Objective}
+We use PPO with an MLP policy and clipped policy updates. PPO optimizes:
+\[
+\mathcal{L}^{\text{CLIP}}(\theta) =
+\mathbb{E}_t\left[
+\min\left(r_t(\theta)\hat{A}_t,\,
+\text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon)\hat{A}_t\right)
+\right].
+\]
+
+\subsection{Reward Shaping Framework}
+The shaped reward augments sparse environment reward with dense terms for:
+\begin{itemize}
+    \item contact and grasp acquisition,
+    \item lift and transport progress,
+    \item release and placement events,
+    \item final success bonus.
+\end{itemize}
+For state labeling, v2/v3 do not directly use RoboCasa's default \texttt{OU.check\_obj\_grasped}. Instead, they use a task-specific robust grasp check and then define a stricter effective \texttt{grasped} state through additional gating (e.g., stability/transportability conditions). This redefinition is used consistently by reward logic and episode metrics.
+The implementation also logs atomic metrics such as \texttt{contact\_success\_rate}, \texttt{grasp\_success\_rate}, \texttt{grasp\_lift\_success\_rate}, and \texttt{place\_success\_rate} to inspect stage-wise learning.
+
+\subsection{Lightweight Reward Curriculum Across Versions}
+The shaping pipeline uses a lightweight reward-curriculum mechanism across v1--v3. Specifically, dense shaping is progressively scaled during early training (curriculum steps), so optimization is not immediately dominated by shaped rewards. In addition, phase-capping is available in later versions (v2/v3) to restrict active shaping terms to earlier skill stages (e.g., lift-focused phase) before enabling the full objective set. This curriculum is reward-centric (not environment-switching curriculum), and is designed to stabilize early exploration while preserving the final task objective.
+
+\subsection{Versioned Reward Design and Term Interpretation}
+Table~\ref{tab:reward-compare} compares core reward coefficients for the three report versions. This comparison highlights the shift from moderate shaping (v1), to grasp-stability shaping (v2), to strongly outcome-biased shaping for bowl transfer (v3).
+
+\begin{table}[h]
+\centering
+\caption{Key reward-term defaults across v1, v2, and v3.}
+\label{tab:reward-compare}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Reward Term & v1 & v2 & v3 \\
+\midrule
+Reach reward & 1.5 & 3.0 & 3.0 \\
+Contact reward & N/A & 0.5 & 0.5 \\
+Pre-grasp reward & 0.1 & 0.3 & 0.3 \\
+Grasp reward & 3.0 & 3.0 & 3.0 \\
+Grasp-hold reward & N/A & 0.3 & 0.01 \\
+Lift reward & 2.0 & 2.0 & 0.5 \\
+Lift-sustain reward & N/A & 0.5 & 2.0 \\
+Release reward & 0.5 & 0.5 & 2.0 \\
+Transport reward & 2.0 & 2.0 & 6.0 \\
+Place reward & 3.0 & 3.0 & 3.0 \\
+Success reward & 10.0 & 10.0 & 100.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+In addition, v3 introduces explicit anti-cheating penalties and a retraction reward, which are not present in v1/v2. This makes v3's objective more strongly coupled to complete placement behavior rather than grasp-only progress. Below is a concise interpretation of the main reward terms used across versions:
+\begin{itemize}
+    \item \textbf{Reach reward}: encourages the end-effector to move closer to the object.
+    \item \textbf{Contact reward}: gives credit when the gripper first establishes object contact.
+    \item \textbf{Pre-grasp reward}: rewards near-object alignment before a stable grasp is formed.
+    \item \textbf{Grasp reward}: provides a bonus when a valid grasp is achieved.
+    \item \textbf{Grasp-hold reward}: rewards maintaining grasp stability over time.
+    \item \textbf{Lift reward}: encourages lifting the object above its initial height.
+    \item \textbf{Lift-sustain reward}: rewards keeping the object elevated after lifting.
+    \item \textbf{Release reward}: encourages opening the gripper at the target placement stage.
+    \item \textbf{Transport reward}: rewards moving the grasped object toward the goal region.
+    \item \textbf{Place reward}: gives credit when the object reaches the target receptacle.
+    \item \textbf{Success reward}: sparse terminal bonus for satisfying full task completion criteria.
+    \item \textbf{Drop / anti-cheating penalties}: penalize undesirable shortcuts (e.g., premature lift, air-close, accidental drop), improving policy robustness.
+    \item \textbf{Retraction reward} (v3): rewards pulling the gripper away after placement to satisfy strict success checks.
+\end{itemize}
+
+\section{Experimental Protocol}
+\subsection{Software Stack}
+\begin{itemize}
+    \item Simulator stack: RoboCasa + robosuite.
+    \item RL library: Stable-Baselines3 PPO.
+    \item Training implementation: PPO reward-shaping v3 entrypoint.
+    \item Evaluation implementation: deterministic policy rollout entrypoint.
+\end{itemize}
+
+\subsection{Training Configuration}
+Representative settings used in the main reported v3 run (not necessarily script defaults):
+\begin{itemize}
+    \item horizon: 700,
+    \item \(n\_steps=2048\), batch size \(=256\), \(n\_envs=4\),
+    \item learning rate schedule from \(5\times10^{-5}\) to \(5\times10^{-6}\),
+    \item v3 is initialized from a pretrained v2 checkpoint (policy and normalization state),
+    \item checkpoint-based resume is supported, enabling breakpoint recovery and continued training,
+    \item total timesteps up to \(\sim 1.56\)M for v3 logs analyzed here.
+\end{itemize}
+
+\section{Results}
+\subsection{Quantitative Comparison}
+Table~\ref{tab:main} summarizes final logged performance for the three reported model versions.
+
+\begin{table}[h]
+\centering
+\caption{Final performance comparison across v1--v3 (from available logs in this repository).}
+\label{tab:main}
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+Version & Task & Timestep & Success Rate & Place Success Rate & Grasp Success Rate \\
+\midrule
+v1 & apple-to-cab & 3,006,464 & 0\% & 0\% & 81\% \\
+v2 & apple-to-cab & 3,006,464 & 0\% & 0\% & 100\% \\
+v3 & apple-to-bowl & 1,556,480 & 8\% & 13\% & 82\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Key Observations}
+\begin{itemize}
+    \item v1 and v2 both show strong grasp learning on apple-to-cab, with v2 reaching near-saturated grasp rate.
+    \item v3 achieves non-zero placement and final success on apple-to-bowl, unlike v1/v2 in their reported logs.
+    \item The gap between grasp-related and success-related metrics in v3 indicates a late-stage bottleneck (release, stabilization, or disengagement).
+\end{itemize}
+
+\subsection{Behavioral Evidence from Rollouts}
+Observed policy behavior in evaluation videos matches the metric trends:
+\begin{itemize}
+    \item the gripper often reaches and secures the apple,
+    \item the end-effector transports near the bowl region,
+    \item but episodes frequently fail to complete a clean release-away sequence.
+\end{itemize}
+This suggests a local optimum: maximizing dense transport/grasp incentives without reliably satisfying strict terminal conditions.
+
+\section{Discussion}
+\subsection{Why Shaping Helps}
+Compared with sparse-only learning, shaped rewards clearly bootstrap useful skills (contact, grasp, transport), making training dynamics non-trivial and reproducible.
+
+\subsection{Why Final Success Remains Limited}
+Three likely factors:
+\begin{enumerate}
+    \item \textbf{Reward imbalance}: sustained intermediate rewards can dominate rare terminal rewards. In practice, dense shaping terms (e.g., reach, grasp, transport, and hold-related rewards) are collected frequently within an episode, so their cumulative contribution to return can become much larger than the sparse success bonus that appears only at full completion. Under this imbalance, the policy may converge to a locally optimal strategy that reliably maximizes repeatable partial-progress rewards (grasping and hovering near the target) without consistently executing the high-precision release-and-disengage sequence required for final success.
+    \item \textbf{Strict success definition}: bowl placement also requires release and sufficient gripper-object separation.
+    \item \textbf{Training horizon may be insufficient}: the current runs may require longer training steps to clearly observe whether final success continues to improve or plateaus.
+\end{enumerate}
+
+\noindent These factors likely interact rather than act in isolation. In particular, transfer from a strong v2 grasp-centric prior can stabilize early subskills but also preserve behavior patterns that are suboptimal for bowl completion (e.g., grasp-and-hover tendencies). Combined with strict terminal checks and dense intermediate rewards, this interaction can produce the observed metric profile: relatively strong grasp rates but lower place/final success rates. \textbf{Despite introducing a lightweight reward curriculum}, the current training dynamics still indicate that late-stage release-and-disengagement behavior remains the principal bottleneck.
+
+\subsection{Limitations}
+This report focuses on logged training curves from a limited set of runs. No broad hyperparameter sweep or significance testing is included; therefore conclusions should be treated as empirical findings rather than definitive generalization.
+
+\section{Conclusion}
+This report shows that PPO with reward shaping can reliably learn manipulation \emph{subskills} (especially reach, grasp, and transport) in RoboCasa tasks, but full task completion remains substantially harder than intermediate progress. Across the analyzed runs, the apple-to-bowl setting achieves non-zero success yet still exhibits a clear gap between high grasp-related metrics and lower final success metrics.
+
+The results indicate that this gap is mainly associated with late-stage execution requirements: successful bowl completion depends not only on placing the object in the receptacle, but also on a clean release-and-disengagement sequence. Under dense shaping, policies can therefore converge to local optima that favor repeatable partial progress over precise terminal behavior.
+
+Overall, the key lesson is that reward shaping is necessary but not sufficient for robust end-to-end success in strict long-horizon manipulation tasks. Future work should focus on improving post-placement reward balance and extending training duration to better determine whether final success continues to improve or reaches an early plateau.
+
+\section*{Reproducibility Notes}
+\begin{itemize}
+    \item Main components: PPO reward-shaping v3 training pipeline and deterministic evaluation pipeline.
+    \item Data sources: versioned training metrics logs for the v1, v2, and v3 experiments.
+    \item Evaluation media: rollout videos generated from deterministic policy inference.
+\end{itemize}
+
+\end{document}

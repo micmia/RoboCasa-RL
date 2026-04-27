@@ -197,17 +197,17 @@ class AtomicRewardShapingWrapper(gym.Wrapper):
         drop_penalty=2.0,
         gripper_open_reward=0.1,
         gripper_close_reward=0.3,
-        lift_reward=2.0,
-        lift_threshold=0.05,
+        lift_reward=0.5,
+        lift_threshold=0.005,
         contact_reward=0.5,
-        grasp_hold_reward=0.3,
-        lift_sustain_reward=0.5,
+        grasp_hold_reward=0.01,
+        lift_sustain_reward=2.0,
         grasp_lift_bonus=5.0,
         table_height=0.88,
-        transport_reward=2.0,
+        transport_reward=6.0,
         place_reward=3.0,
-        success_reward=10.0,
-        release_reward=0.5,
+        success_reward=100.0,
+        release_reward=2.0,
         action_penalty_weight=0.005,
         gripper_open_threshold=0.14,
         gripper_close_threshold=0.06,
@@ -223,8 +223,8 @@ class AtomicRewardShapingWrapper(gym.Wrapper):
         air_close_dist_m=0.10,
         air_close_penalty=0.05,
         phase_cap="full",
-        retraction_reward=3.0,
-        retraction_dist_m=0.05,
+        retraction_reward=4.0,
+        retraction_dist_m=0.0,
     ):
         super().__init__(env)
         self.reach_reward = reach_reward
@@ -474,13 +474,13 @@ class AtomicRewardShapingWrapper(gym.Wrapper):
                     shaped += scale * self.grasp_reward
                     self._first_grasp_step = self._episode_step
 
-            if self.phase_cap != "lift" and lifted:
-                # Transport reward only when the apple is lifted — prevents a "drag along counter"
-                # local optimum and preserves the lift-then-transport skill from pretraining.
+            if self.phase_cap != "lift":
+                # Transport reward on every grasped step — gives bowl-direction gradient
+                # from the moment the apple is gripped so the policy learns lift-and-carry.
                 bowl_pos = self._bowl_pos_cached(raw_env)
                 if bowl_pos is not None and obj_pos is not None:
                     dist_obj_bowl = float(np.linalg.norm(obj_pos - bowl_pos))
-                    transport_dense = float(1.0 - np.tanh(0.8 * dist_obj_bowl))
+                    transport_dense = float(1.0 - np.tanh(2.0 * dist_obj_bowl))
                     shaped += scale * self.transport_reward * 0.5 * transport_dense
                     if self._prev_dist_obj_bowl is not None:
                         delta_bowl = self._prev_dist_obj_bowl - dist_obj_bowl
@@ -712,52 +712,65 @@ def make_env(args, rank, monitor_root):
 def main():
     parser = argparse.ArgumentParser(description="Train PPO to pick apple and place into bowl.")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--headless", action="store_true")
+    parser.add_argument(
+        "--headless",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run without on-screen renderer (default: on). Use --no-headless for GUI.",
+    )
     parser.add_argument("--horizon", type=int, default=700)
     parser.add_argument("--n_envs", type=int, default=1)
     parser.add_argument("--total_timesteps", type=int, default=3_000_000)
-    parser.add_argument("--learning_rate", type=float, default=3e-4)
-    parser.add_argument("--lr_final", type=float, default=1e-5)
+    parser.add_argument("--learning_rate", type=float, default=5e-5)
+    parser.add_argument("--lr_final", type=float, default=5e-6)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--n_steps", type=int, default=2048)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae_lambda", type=float, default=0.95)
-    parser.add_argument("--ent_coef", type=float, default=0.005)
+    parser.add_argument("--ent_coef", type=float, default=0.01)
     parser.add_argument("--clip_range", type=float, default=0.2)
     parser.add_argument("--n_epochs", type=int, default=10)
     parser.add_argument("--max_grad_norm", type=float, default=0.5)
     parser.add_argument("--log_root", type=str, default=None)
     parser.add_argument("--model_dir", type=str, default="models")
-    parser.add_argument("--run_name", type=str, default="")
+    parser.add_argument("--run_name", type=str)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--no_vecnorm", action="store_true")
-    parser.add_argument("--checkpoint_freq", type=int, default=200_000)
-    parser.add_argument("--load_model", type=str, default=None,
-                        help="Path to a .zip model checkpoint to fine-tune from (e.g. v2 final model).")
-    parser.add_argument("--load_vecnorm", type=str, default=None,
-                        help="Path to a VecNormalize .pkl to initialise normalisation stats from.")
+    parser.add_argument("--checkpoint_freq", type=int, default=100_000)
+    parser.add_argument(
+        "--load_model",
+        type=str,
+        default="models/ppo_reward_shaping_v2_20260424_170825/checkpoints/ppo_ckpt_3000000_steps.zip",
+        help="Path to a .zip checkpoint to fine-tune from. Pass empty string to train from scratch.",
+    )
+    parser.add_argument(
+        "--load_vecnorm",
+        type=str,
+        default="models/ppo_reward_shaping_v2_20260424_170825/checkpoints/ppo_ckpt_vecnormalize_3000000_steps.pkl",
+        help="Path to a VecNormalize .pkl for initial stats. Pass empty string for fresh normalisation.",
+    )
 
     # Reward shaping
     parser.add_argument("--reach_reward", type=float, default=3.0)
     parser.add_argument("--reach_abs_coef", type=float, default=0.25)
     parser.add_argument("--contact_reward", type=float, default=0.5)
-    parser.add_argument("--grasp_hold_reward", type=float, default=0.3)
+    parser.add_argument("--grasp_hold_reward", type=float, default=0.01)
     parser.add_argument("--pre_grasp_reward", type=float, default=0.3)
     parser.add_argument("--grasp_reward", type=float, default=3.0)
     parser.add_argument("--drop_penalty", type=float, default=2.0)
-    parser.add_argument("--release_reward", type=float, default=0.5)
+    parser.add_argument("--release_reward", type=float, default=2.0)
     parser.add_argument("--gripper_open_reward", type=float, default=0.1)
     parser.add_argument("--gripper_close_reward", type=float, default=0.3)
-    parser.add_argument("--lift_reward", type=float, default=2.0)
-    parser.add_argument("--lift_threshold", type=float, default=0.05)
-    parser.add_argument("--lift_sustain_reward", type=float, default=0.5)
+    parser.add_argument("--lift_reward", type=float, default=0.5)
+    parser.add_argument("--lift_threshold", type=float, default=0.005)
+    parser.add_argument("--lift_sustain_reward", type=float, default=2.0)
     parser.add_argument("--grasp_lift_bonus", type=float, default=5.0)
     parser.add_argument("--phase_cap", type=str, default="full", choices=["full", "lift"])
     parser.add_argument("--freeze_base", action="store_true", default=False)
     parser.add_argument("--base_action_start", type=int, default=8)
-    parser.add_argument("--transport_reward", type=float, default=2.0)
+    parser.add_argument("--transport_reward", type=float, default=6.0)
     parser.add_argument("--place_reward", type=float, default=3.0)
-    parser.add_argument("--success_reward", type=float, default=10.0)
+    parser.add_argument("--success_reward", type=float, default=100.0)
     parser.add_argument("--action_penalty_weight", type=float, default=0.005)
     parser.add_argument("--table_height", type=float, default=0.88)
     parser.add_argument("--gripper_open_threshold", type=float, default=0.14)
@@ -774,8 +787,8 @@ def main():
     parser.add_argument("--air_close_grip_threshold", type=float, default=0.70)
     parser.add_argument("--air_close_dist_m", type=float, default=0.10)
     parser.add_argument("--air_close_penalty", type=float, default=0.05)
-    parser.add_argument("--retraction_reward", type=float, default=3.0)
-    parser.add_argument("--retraction_dist_m", type=float, default=0.05)
+    parser.add_argument("--retraction_reward", type=float, default=4.0)
+    parser.add_argument("--retraction_dist_m", type=float, default=0.0)
 
     args = parser.parse_args()
 

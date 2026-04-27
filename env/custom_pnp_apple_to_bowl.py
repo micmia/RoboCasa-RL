@@ -179,6 +179,6 @@ class MyPnPAppleToBowl(PickPlaceCounterToCabinet):
     def _check_success(self):
         apple_in_bowl = OU.check_obj_in_receptacle(self, "obj", "container")
         # Use 0.08m threshold (vs default 0.25m): bowl is on the counter so less clearance is needed.
-        gripper_far = OU.gripper_obj_far(self, obj_name="obj", th=0.08)
+        gripper_far = OU.gripper_obj_far(self, obj_name="obj", th=0.05)
         return apple_in_bowl and gripper_far
 

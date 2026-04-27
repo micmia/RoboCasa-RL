@@ -450,6 +450,7 @@ def main():
     if args.save_video:
         video_dir = os.path.join(args.video_dir, run_name)
         os.makedirs(video_dir, exist_ok=True)
+        print(f"Video save directory: {os.path.abspath(video_dir)}")
 
     success_count = 0
     for ep in range(args.episodes):

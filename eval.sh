@@ -9,7 +9,13 @@
 
 set -euo pipefail
 
-cd "$(dirname "$0")"
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+  cd "${SLURM_SUBMIT_DIR}"
+elif [[ -n "${PROJECT_ROOT:-}" ]]; then
+  cd "${PROJECT_ROOT}"
+else
+  cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 
 MODEL_PATH="${MODEL_PATH:-}"
 EPISODES="${EPISODES:-10}"

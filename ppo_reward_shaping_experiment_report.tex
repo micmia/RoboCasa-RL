@@ -1,0 +1,580 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{listings}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  columns=fullflexible,
+  showstringspaces=false,
+  frame=single,
+}
+
+\title{Coursework Report: PPO with Reward Shaping in RoboCasa Manipulation Tasks}
+\date{April 27, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This report studies Proximal Policy Optimization (PPO) with reward shaping for two
+robotic manipulation tasks in RoboCasa: \emph{apple-to-cabinet} and \emph{apple-to-bowl}.
+The goal is to analyze how dense shaping terms affect learning progress and policy
+behavior, especially in long-horizon sparse-reward settings. Experiments are run with
+Stable-Baselines3 PPO and task-specific wrappers that expose success-related sub-metrics.
+Results show that reward shaping is necessary to avoid complete learning collapse, but
+also introduces local optima where the robot learns to grasp and hover near target
+regions without consistently finishing placement and release. Section~\ref{sec:branch}
+documents the changes introduced on branch
+\texttt{feature/test-new-reward-shaping}, which target precisely this
+``grasp-and-hover'' failure mode by adding an explicit \emph{hold} reward, a
+\emph{close-while-near} ramp, an \emph{anti-open-under-contact} penalty, and strict
+state gates configurable through a curriculum.
+\end{abstract}
+
+\section{Introduction}
+Sparse-reward robotic manipulation remains challenging because meaningful learning
+signals are rare and delayed. In long-horizon pick-and-place tasks, PPO may learn
+slowly or collapse to ineffective exploration when only terminal success is rewarded.
+Reward shaping addresses this issue by introducing intermediate objectives aligned
+with task progress.
+
+This report studies PPO with reward shaping in two RoboCasa tasks and evaluates how
+shaping design affects (i) subskill acquisition and (ii) end-to-end success.
+
+\section{Problem Formulation}
+
+\subsection{Tasks}
+We consider two related manipulation tasks:
+\begin{itemize}
+  \item \textbf{Apple-to-Cabinet (apple-to-cab):} pick an apple from a counter and
+    place it into a cabinet region.
+  \item \textbf{Apple-to-Bowl (apple-to-bowl):} pick an apple from a counter and
+    place it into a bowl.
+\end{itemize}
+
+\subsection{Success Criteria and Transfer Challenge}
+The two tasks share a pick--transport--place structure, but differ in terminal
+constraints. The bowl task requires both successful placement and gripper
+disengagement, making release behavior critical. As a result, policies transferred
+from apple-to-cab may preserve grasp and transport skills yet still underperform on
+final success in apple-to-bowl.
+
+\section{Method}
+
+\subsection{PPO Objective}
+We use PPO with an MLP policy and clipped policy updates. PPO optimizes:
+\begin{equation*}
+  \mathcal{L}^{\text{CLIP}}(\theta) = \mathbb{E}_t \left[ \min\!\left(
+  r_t(\theta)\hat{A}_t,\ \mathrm{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon)\hat{A}_t
+  \right) \right] .
+\end{equation*}
+
+\subsection{Reward Shaping Framework}
+The shaped reward augments sparse environment reward with dense terms for:
+\begin{itemize}
+  \item contact and grasp acquisition,
+  \item lift and transport progress,
+  \item release and placement events,
+  \item final success bonus.
+\end{itemize}
+
+For state labeling, v2/v3 do not directly use RoboCasa's default
+\texttt{OU.check\_obj\_grasped}. Instead, they use a task-specific robust grasp
+check and then define a stricter \emph{effective grasped} state through additional
+gating (e.g., stability/transportability conditions). This redefinition is used
+consistently by reward logic and episode metrics. The implementation also logs
+atomic metrics such as \texttt{contact\_success\_rate},
+\texttt{grasp\_success\_rate}, \texttt{grasp\_lift\_success\_rate}, and
+\texttt{place\_success\_rate} to inspect stage-wise learning.
+
+\subsection{Lightweight Reward Curriculum Across Versions}
+The shaping pipeline uses a lightweight reward-curriculum mechanism across v1--v3.
+Specifically, dense shaping is progressively scaled during early training (curriculum
+steps), so optimization is not immediately dominated by shaped rewards. In addition,
+phase-capping is available in later versions (v2/v3) to restrict active shaping
+terms to earlier skill stages (e.g., lift-focused phase) before enabling the full
+objective set. This curriculum is reward-centric (not environment-switching
+curriculum), and is designed to stabilize early exploration while preserving the
+final task objective.
+
+\subsection{Versioned Reward Design and Term Interpretation}
+Table~\ref{tab:rewards} compares core reward coefficients for the three report
+versions. This comparison highlights the shift from moderate shaping (v1), to
+grasp-stability shaping (v2), to strongly outcome-biased shaping for bowl transfer
+(v3).
+
+\begin{table}[h]
+\centering
+\caption{Key reward-term defaults across v1, v2, and v3.}
+\label{tab:rewards}
+\begin{tabular}{lccc}
+\toprule
+Reward Term & v1 & v2 & v3 \\
+\midrule
+Reach reward         & 1.5 & 3.0 & 3.0 \\
+Contact reward       & N/A & 0.5 & 0.5 \\
+Pre-grasp reward     & 0.1 & 0.3 & 0.3 \\
+Grasp reward         & 3.0 & 3.0 & 3.0 \\
+Grasp-hold reward    & N/A & 0.3 & 0.01 \\
+Lift reward          & 2.0 & 2.0 & 0.5 \\
+Lift-sustain reward  & N/A & 0.5 & 2.0 \\
+Release reward       & 0.5 & 0.5 & 2.0 \\
+Transport reward     & 2.0 & 2.0 & 6.0 \\
+Place reward         & 3.0 & 3.0 & 3.0 \\
+Success reward       & 10.0 & 10.0 & 100.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+In addition, v3 introduces explicit anti-cheating penalties and a retraction
+reward, which are not present in v1/v2. This makes v3's objective more strongly
+coupled to complete placement behavior rather than grasp-only progress. Below is a
+concise interpretation of the main reward terms used across versions:
+
+\begin{itemize}
+  \item \textbf{Reach reward}: encourages the end-effector to move closer to the object.
+  \item \textbf{Contact reward}: gives credit when the gripper first establishes object contact.
+  \item \textbf{Pre-grasp reward}: rewards near-object alignment before a stable grasp is formed.
+  \item \textbf{Grasp reward}: provides a bonus when a valid grasp is achieved.
+  \item \textbf{Grasp-hold reward}: rewards maintaining grasp stability over time.
+  \item \textbf{Lift reward}: encourages lifting the object above its initial height.
+  \item \textbf{Lift-sustain reward}: rewards keeping the object elevated after lifting.
+  \item \textbf{Release reward}: encourages opening the gripper at the target placement stage.
+  \item \textbf{Transport reward}: rewards moving the grasped object toward the goal region.
+  \item \textbf{Place reward}: gives credit when the object reaches the target receptacle.
+  \item \textbf{Success reward}: sparse terminal bonus for satisfying full task completion criteria.
+  \item \textbf{Drop / anti-cheating penalties}: penalize undesirable shortcuts (e.g., premature lift, air-close, accidental drop), improving policy robustness.
+  \item \textbf{Retraction reward (v3)}: rewards pulling the gripper away after placement to satisfy strict success checks.
+\end{itemize}
+
+\section{Experimental Protocol}
+
+\subsection{Software Stack}
+\begin{itemize}
+  \item Simulator stack: RoboCasa + robosuite.
+  \item RL library: Stable-Baselines3 PPO.
+  \item Training implementation: PPO reward-shaping v3 entrypoint.
+  \item Evaluation implementation: deterministic policy rollout entrypoint.
+\end{itemize}
+
+\subsection{Training Configuration}
+Representative settings used in the main reported v3 run (not necessarily script
+defaults):
+\begin{itemize}
+  \item horizon: $700$,
+  \item $n\_steps = 2048$, batch size $= 256$, $n\_envs = 4$,
+  \item learning rate schedule from $5\times 10^{-5}$ to $5\times 10^{-6}$,
+  \item v3 is initialized from a pretrained v2 checkpoint (policy and
+    normalization state),
+  \item checkpoint-based resume is supported, enabling breakpoint recovery and
+    continued training,
+  \item total timesteps up to $\sim 1.56\text{M}$ for v3 logs analyzed here.
+\end{itemize}
+
+\section{Results}
+
+\subsection{Quantitative Comparison}
+Table~\ref{tab:results} summarizes final logged performance for the three
+reported model versions.
+
+\begin{table}[h]
+\centering
+\caption{Final performance comparison across v1--v3 (from available logs in this repository).}
+\label{tab:results}
+\begin{tabular}{llrrrr}
+\toprule
+Version & Task & Timestep & Success Rate & Place Success & Grasp Success \\
+\midrule
+v1 & apple-to-cab  & 3{,}006{,}464 & 0\%  & 0\%  & 81\%  \\
+v2 & apple-to-cab  & 3{,}006{,}464 & 0\%  & 0\%  & 100\% \\
+v3 & apple-to-bowl & 1{,}556{,}480 & 8\%  & 13\% & 82\%  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Key Observations}
+\begin{itemize}
+  \item v1 and v2 both show strong grasp learning on apple-to-cab, with v2
+    reaching near-saturated grasp rate.
+  \item v3 achieves non-zero placement and final success on apple-to-bowl,
+    unlike v1/v2 in their reported logs.
+  \item The gap between grasp-related and success-related metrics in v3
+    indicates a late-stage bottleneck (release, stabilization, or
+    disengagement).
+\end{itemize}
+
+\subsection{Behavioral Evidence from Rollouts}
+Observed policy behavior in evaluation videos matches the metric trends:
+\begin{itemize}
+  \item the gripper often reaches and secures the apple,
+  \item the end-effector transports near the bowl region,
+  \item but episodes frequently fail to complete a clean release-away sequence.
+\end{itemize}
+This suggests a local optimum: maximizing dense transport/grasp incentives without
+reliably satisfying strict terminal conditions.
+
+\section{Discussion}
+
+\subsection{Why Shaping Helps}
+Compared with sparse-only learning, shaped rewards clearly bootstrap useful
+skills (contact, grasp, transport), making training dynamics non-trivial and
+reproducible.
+
+\subsection{Why Final Success Remains Limited}
+Three likely factors:
+\begin{enumerate}
+  \item \textbf{Reward imbalance}: sustained intermediate rewards can dominate rare
+    terminal rewards. In practice, dense shaping terms (e.g., reach, grasp,
+    transport, and hold-related rewards) are collected frequently within an
+    episode, so their cumulative contribution to return can become much larger
+    than the sparse success bonus that appears only at full completion. Under
+    this imbalance, the policy may converge to a locally optimal strategy that
+    reliably maximizes repeatable partial-progress rewards (grasping and
+    hovering near the target) without consistently executing the high-precision
+    release-and-disengage sequence required for final success.
+  \item \textbf{Strict success definition}: bowl placement also requires release
+    and sufficient gripper--object separation.
+  \item \textbf{Training horizon may be insufficient}: the current runs may
+    require longer training steps to clearly observe whether final success
+    continues to improve or plateaus.
+\end{enumerate}
+
+These factors likely interact rather than act in isolation. In particular, transfer
+from a strong v2 grasp-centric prior can stabilize early subskills but also preserve
+behavior patterns that are suboptimal for bowl completion (e.g., grasp-and-hover
+tendencies). Combined with strict terminal checks and dense intermediate rewards,
+this interaction can produce the observed metric profile: relatively strong grasp
+rates but lower place/final success rates. \textbf{Despite introducing a lightweight
+reward curriculum}, the current training dynamics still indicate that late-stage
+release-and-disengagement behavior remains the principal bottleneck.
+
+\subsection{Limitations}
+This report focuses on logged training curves from a limited set of runs. No broad
+hyperparameter sweep or significance testing is included; therefore conclusions
+should be treated as empirical findings rather than definitive generalization.
+
+\section{Conclusion}
+This report shows that PPO with reward shaping can reliably learn manipulation
+\emph{subskills} (especially reach, grasp, and transport) in RoboCasa tasks, but
+full task completion remains substantially harder than intermediate progress.
+Across the analyzed runs, the apple-to-bowl setting achieves non-zero success yet
+still exhibits a clear gap between high grasp-related metrics and lower final
+success metrics.
+
+The results indicate that this gap is mainly associated with late-stage execution
+requirements: successful bowl completion depends not only on placing the object in
+the receptacle, but also on a clean release-and-disengagement sequence. Under dense
+shaping, policies can therefore converge to local optima that favor repeatable
+partial progress over precise terminal behavior.
+
+Overall, the key lesson is that reward shaping is necessary but not sufficient for
+robust end-to-end success in strict long-horizon manipulation tasks. Future work
+should focus on improving post-placement reward balance and extending training
+duration to better determine whether final success continues to improve or reaches
+an early plateau.
+
+% =====================================================================
+% New content: branch feature/test-new-reward-shaping
+% =====================================================================
+\section{Branch \texttt{feature/test-new-reward-shaping}: Targeted Fixes for Grasp-and-Hold Instability}
+\label{sec:branch}
+
+This section documents the changes introduced on the branch
+\texttt{feature/test-new-reward-shaping} (commits
+\texttt{a6ad4e6}, \texttt{85e424b}, \texttt{a61e9a7}, \texttt{2646c74}). The
+focus is to address the grasp-and-hold instability identified in the v3 rollouts
+of Section~5.3 and to make the experimental protocol reproducible on a SLURM
+cluster.
+
+\subsection{Diagnostic: why grasping was unstable}
+Evaluation logs of v3 showed that the policy reached the apple but rarely
+transitioned into a stable \emph{grasp-and-hold} regime: \texttt{grasp} and
+\texttt{inside} indicators were near zero across most episodes
+(\texttt{eval\_robocasa\_dense.py}: \texttt{grasp=0.000}, \texttt{inside=0.000}
+in most steps). The dominant failure mode was a release-then-drop pattern:
+the gripper closed, then partially reopened during transport. Two contributing
+mechanisms were hypothesized:
+\begin{itemize}
+  \item \textbf{Gripper-action jitter}: PPO exploration noise on the gripper
+    dimension, combined with the absence of an explicit cost on opening under
+    contact, produced micro-oscillations that broke the contact streak.
+  \item \textbf{Insufficient hold incentive}: the v3 reward paid for
+    \emph{achieving} a grasp but barely for \emph{maintaining} it
+    (Table~\ref{tab:rewards}: grasp-hold weight $0.01$).
+\end{itemize}
+
+\subsection{New shaping wrapper: \texttt{DenseStrictRewardWrapper}}
+A new training entrypoint
+\texttt{scripts/train\_ppo\_reward\_shaping\_dense.py} introduces
+\texttt{DenseStrictRewardWrapper}, a Gym wrapper that recomputes the dense
+shaped reward each step and exposes per-term values through
+\texttt{info["dense\_terms"]}. The same wrapper is used by
+\texttt{scripts/eval\_robocasa\_dense.py} so that evaluation reward and
+training reward are strictly comparable. The shaping vector is:
+\begin{equation*}
+r_{\text{dense}} = \underbrace{w_r e^{-\tau_r d_{eef,obj}}}_{\text{reach}}
++ \underbrace{w_g\, \mathbb{1}_{\text{grasped}}}_{\text{grasp}}
++ \underbrace{w_h\, \tfrac{s_{\text{grasp}}}{S_{\max}}}_{\text{hold}}
++ \underbrace{w_n \cdot \mathrm{near}(d) \cdot c_{\text{grip}}}_{\text{close-near}}
+- \underbrace{w_o \cdot \mathbb{1}_{\text{contact}} \cdot \Delta_{\text{open}}}_{\text{open-contact penalty}}
++ \underbrace{w_l\, \tfrac{h}{h_{\min}}}_{\text{lift}}
++ \underbrace{w_c e^{-\tau_c d_{obj,\text{tgt}}}}_{\text{carry}}
++ \underbrace{w_i\, \mathbb{1}_{\text{inside}}}_{\text{inside}}
++ \underbrace{w_s\, \mathbb{1}_{\text{success}}}_{\text{success}}
+\end{equation*}
+where $s_{\text{grasp}}$ is the consecutive-grasp streak, $c_{\text{grip}}$ is the
+gripper closure fraction in $[0,1]$, $\Delta_{\text{open}}$ is the per-step decrease
+of $c_{\text{grip}}$, and $\mathrm{near}(d) = \mathrm{clip}(1 - d/d_{\text{near}}, 0, 1)$.
+
+The four ideas listed in the project brief map to specific terms:
+\begin{itemize}
+  \item \emph{Hold reward (most important)} $\to$ \texttt{w\_hold} on the
+    grasp streak \texttt{raw\_grasp\_streak / hold\_max\_steps}.
+  \item \emph{Close-while-near} $\to$ \texttt{w\_close\_near}, active even
+    \emph{before} \texttt{check\_obj\_grasped} flips, so the gradient field
+    pulls the policy toward closing as it approaches the object.
+  \item \emph{Open-under-contact penalty} $\to$ \texttt{w\_open\_contact\_penalty}
+    weighting $\Delta_{\text{open}}$ whenever
+    \texttt{raw\_grasped or raw\_grasp\_streak > 0}.
+  \item \emph{Strict gates softened at start, then hardened} $\to$
+    \texttt{StrictStateCfg} parameters
+    (\texttt{grasp\_min\_consecutive}, \texttt{grasp\_min\_close},
+    \texttt{inside\_min\_consecutive}, \dots) made fully configurable through
+    CLI flags so a curriculum can ramp them.
+\end{itemize}
+
+\subsubsection*{New shaping hyperparameters and their defaults}
+Table~\ref{tab:new-shaping} lists the new shaping weights and their script
+defaults (\texttt{train\_ppo\_reward\_shaping\_dense.py},
+\texttt{train\_ppo\_curriculum\_dense.py}). These weights are intentionally
+small relative to v3 success bonus (\texttt{w\_success}=5.0) so that the dense
+terms guide exploration without dominating the terminal signal.
+
+\begin{table}[h]
+\centering
+\caption{New dense-reward weights introduced on the branch.}
+\label{tab:new-shaping}
+\begin{tabular}{lll}
+\toprule
+Flag & Default & Role \\
+\midrule
+\texttt{--w\_reach}                 & 0.25 & exponential reach shaping \\
+\texttt{--w\_grasp}                 & 0.35 & strict-grasped indicator \\
+\texttt{--w\_hold}                  & 0.25 & grasp-streak hold bonus \\
+\texttt{--w\_close\_near}           & 0.15 & close-while-near ramp \\
+\texttt{--w\_open\_contact\_penalty}& 0.25 & negative for opening under contact \\
+\texttt{--w\_lift}                  & 0.20 & normalized lift height \\
+\texttt{--w\_carry}                 & 0.35 & exponential carry to target \\
+\texttt{--w\_inside}                & 0.75 & strict-inside indicator \\
+\texttt{--w\_success}               & 5.0  & terminal success bonus \\
+\texttt{--reach\_temp}              & 4.0  & decay rate of reach shaping \\
+\texttt{--carry\_temp}              & 4.0  & decay rate of carry shaping \\
+\texttt{--close\_near\_dist\_m}     & 0.05 & ramp width for close-while-near (m) \\
+\texttt{--hold\_max\_steps}         & 50   & saturation horizon of hold streak \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\centering
+\caption{Strict state-gate parameters (\texttt{StrictStateCfg}).}
+\label{tab:strict}
+\begin{tabular}{lll}
+\toprule
+Flag & Default & Role \\
+\midrule
+\texttt{--strict\_grasp\_lift\_m}         & 0.015 & min lift to count as transportable (m) \\
+\texttt{--strict\_grasp\_min\_consecutive}& 4     & consecutive raw-grasped steps \\
+\texttt{--strict\_grasp\_follow\_dist\_m} & 0.035 & max eef-obj distance during follow (m) \\
+\texttt{--strict\_gripper\_open\_qpos}    & 0.040 & qpos used to normalize closure \\
+\texttt{--strict\_grasp\_min\_close}      & 0.60  & min closure fraction \\
+\texttt{--strict\_inside\_min\_consecutive}& 6    & inside streak required \\
+\texttt{--strict\_inside\_max\_obj\_speed}& 0.15  & max obj speed while ``inside'' (m/s) \\
+\texttt{--allow\_inside\_while\_grasped}  & off   & if set, success allowed while still grasped \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Curriculum entrypoint}
+A second entrypoint, \texttt{train\_ppo\_curriculum\_dense.py}, wraps the
+environment with the existing \texttt{CurriculumWrapper} \emph{before} the
+\texttt{DenseStrictRewardWrapper} and adds a \texttt{CurriculumCallback} that
+advances stages on a rolling success-rate criterion:
+\begin{itemize}
+  \item \texttt{--curriculum\_window}=100 episodes,
+  \item \texttt{--curriculum\_min\_timesteps}=50{,}000 per stage,
+  \item \texttt{--curriculum\_thresholds}=``0.70,0.80'' (advance when window
+    success exceeds threshold).
+\end{itemize}
+This expresses the brief's idea of \emph{starting easy, then hardening}: stage
+$0$ exposes the easier subgoal, and the strict gates (which the operator can
+ramp via CLI) become operative once the policy is competent.
+
+\subsection{New PPO knobs (curriculum entrypoint)}
+On top of the v3 hyperparameters, the curriculum script exposes additional
+PPO controls intended to reduce gripper jitter and improve stability:
+\begin{itemize}
+  \item \texttt{--n\_epochs} (default 10), \texttt{--gamma} (0.995),
+    \texttt{--gae\_lambda} (0.95),
+  \item \texttt{--ent\_coef}, \texttt{--clip\_range} (0.2),
+    \texttt{--vf\_coef} (0.5), \texttt{--max\_grad\_norm} (0.5),
+  \item \texttt{--target\_kl} (optional early-stop on KL divergence).
+\end{itemize}
+Default \texttt{--learning\_rate} is $3\times 10^{-4}$,
+\texttt{--n\_steps} $= 2048$, \texttt{--batch\_size} $= 256$, matching the
+report v3 baseline so changes can be ablated cleanly.
+
+\subsection{Evaluation script alignment}
+\texttt{eval\_robocasa\_dense.py} reuses \texttt{DenseStrictRewardWrapper} and
+\texttt{StrictStateCfg} so that ``what the policy sees at training time'' and
+``what we measure at eval'' are identical wrappers. It also:
+\begin{itemize}
+  \item renders a $2 \times 2$ camera tile
+    (\texttt{robot0\_agentview\_center/left/right} +
+    \texttt{robot0\_eye\_in\_hand}) for diagnosis,
+  \item prints per-episode \texttt{dense\_terms} so that breakdowns (reach,
+    grasp, hold, close-near, open-contact, lift, carry, inside, success) are
+    visible per rollout,
+  \item exposes the same strict-gate flags as training to support sensitivity
+    analysis without retraining.
+\end{itemize}
+
+\subsection{SLURM Experimental Protocol}
+\label{sec:slurm}
+
+\subsubsection*{Cluster topology and remote layout}
+Jobs run on the partition \texttt{3090} (single RTX 3090 per job). The remote
+working tree is \texttt{/home/infres/latoundji-25/robocasa/RoboCasa-RL}.
+Synchronisation is one-way (local $\to$ remote) over rsync via the helper
+scripts in \texttt{scripts/}:
+\begin{lstlisting}
+./scripts/cluster_sync_push.sh        # sources -> cluster (excludes .venv, runs/, artifacts/)
+./scripts/cluster_exec.sh submit train.sh --export=KEY=VAL,...
+./scripts/cluster_exec.sh status      # squeue --me
+./scripts/cluster_exec.sh logs <jobid>
+./scripts/cluster_sync_pull.sh        # cluster -> local (runs/, models/, eval_videos/)
+\end{lstlisting}
+
+\subsubsection*{SLURM resource request (\texttt{train.sh})}
+\begin{itemize}
+  \item \texttt{--partition=3090}, \texttt{--gres=gpu:1},
+  \item \texttt{--mem=32G} (raised from the initial 8\,GB after observing OOM
+    kills with $n\_envs{=}8$ \texttt{SubprocVecEnv}; each worker loads
+    MuJoCo+robocasa+torch in its own address space),
+  \item \texttt{--cpus-per-task=9} (1 main + 8 workers),
+  \item \texttt{--time=24:00:00}, \texttt{--output=runs/slurm/\%x\_\%j.out}.
+\end{itemize}
+
+\subsubsection*{Environment bootstrap}
+\texttt{train.sh} bootstraps a persistent uv-managed venv at
+\texttt{\$HOME/.venvs/robocasa\_rl\_<partition>}, separate from the repo
+\texttt{.venv}, so concurrent jobs share a cache. The bootstrap is serialised
+through an \texttt{flock} on \texttt{.uv\_sync.lock} and consists of:
+\begin{enumerate}
+  \item \texttt{uv venv --python python3.11} (first run only),
+  \item \texttt{uv sync --frozen --no-dev --inexact} (lockfile-driven, keeps
+    extras across runs),
+  \item \texttt{uv pip install --python \$VENV/bin/python <extras>} where the
+    extras list mirrors the working local venv:
+    \texttt{termcolor, mujoco==3.3.1, numpy==2.2.5, scipy, opencv-python,
+    pyyaml, pillow, pygame, qpsolvers[quadprog], pynput, tqdm, rich, h5py,
+    lxml, tensorboard, imageio, imageio-ffmpeg, av, matplotlib, psutil},
+  \item idempotent copy
+    \texttt{robosuite/macros.py} $\to$ \texttt{robosuite/macros\_private.py}
+    (replaces the upstream interactive setup script, unusable in batch).
+\end{enumerate}
+The hard pins \texttt{mujoco==3.3.1} and \texttt{numpy==2.2.5} are required by
+\texttt{robocasa/\_\_init\_\_.py} \texttt{assert} statements; do \emph{not}
+add \texttt{mink} or \texttt{robosuite\_models} as they pull \texttt{numpy<2}
+and break the assert.
+
+\subsubsection*{Reproducible launch command}
+The reference run for the branch is:
+\begin{lstlisting}
+./scripts/cluster_sync_push.sh
+./scripts/cluster_exec.sh submit train.sh \
+  --export=PYTHON_BIN=python3.11,RUN_NAME=reward_dense_${USER},\
+TOTAL_TIMESTEPS=10000000,N_ENVS=8,DEVICE=cpu
+\end{lstlisting}
+\texttt{DEVICE=cpu} reflects the SB3 advisory that PPO with an
+\texttt{MlpPolicy} is typically faster on CPU than on GPU; this is verified
+empirically per partition.
+
+\subsubsection*{Logging and artifacts}
+Each run writes to \texttt{models/\$RUN\_NAME/} on the cluster:
+\begin{itemize}
+  \item \texttt{config.json}: every CLI argument used,
+  \item \texttt{logs/tensorboard/}: SB3 + \texttt{debug/*} metrics
+    (\texttt{--log\_debug}),
+  \item \texttt{logs/monitor/env\_<rank>/}: per-env Monitor CSVs,
+  \item \texttt{logs/metrics.csv}: rollout-level summary
+    (\texttt{ep\_rew\_mean}, \texttt{ep\_len\_mean},
+    \texttt{success\_rate}),
+  \item \texttt{checkpoints/} every \texttt{--checkpoint\_freq} steps,
+  \item \texttt{best/best\_model.zip} every \texttt{--best\_eval\_freq} steps
+    (greedy 5-episode eval),
+  \item \texttt{ppo\_final.zip} at the end of training.
+\end{itemize}
+
+\subsection{Summary of changes by file}
+\begin{itemize}
+  \item \texttt{scripts/train\_ppo\_reward\_shaping\_dense.py} (new):
+    \texttt{DenseStrictRewardWrapper}, \texttt{StrictStateCfg},
+    \texttt{MetricsLoggerCallback}, \texttt{RolloutDebugLoggerCallback}.
+  \item \texttt{scripts/train\_ppo\_curriculum\_dense.py} (new):
+    \texttt{CurriculumCallback} on top of the dense wrapper, additional PPO
+    knobs.
+  \item \texttt{scripts/eval\_robocasa\_dense.py} (new): training-aligned
+    evaluation, multi-camera tiled video, per-term reward dump.
+  \item \texttt{train.sh} / \texttt{eval.sh} (new): SLURM headers, persistent
+    uv venv bootstrap, macro-private setup, sanity checks for
+    \texttt{termcolor / mujoco / numpy} versions.
+  \item \texttt{scripts/cluster\_exec.sh}, \texttt{cluster\_sync\_push.sh},
+    \texttt{cluster\_sync\_pull.sh} (new): submit/status/logs/cancel
+    wrappers and rsync helpers.
+  \item \texttt{\_common.sh} (new): shared SLURM environment setup.
+  \item \texttt{env/custom\_pnp\_counter\_to\_cab.py},
+    \texttt{scripts/train\_ppo\_curriculum.py},
+    \texttt{docs/ALGORITHM\_FLOW.md}: minor edits supporting the new
+    curriculum entrypoint.
+\end{itemize}
+
+\subsection{Expected impact and what to look for in the logs}
+The new shaping is designed so that, in TensorBoard
+(\texttt{--log\_debug}), one should observe:
+\begin{itemize}
+  \item rising \texttt{debug/dense\_terms/hold} as the policy learns to keep
+    the gripper closed,
+  \item near-zero \texttt{debug/dense\_terms/open\_contact\_penalty} once
+    the policy stops oscillating on the gripper dimension,
+  \item rising \texttt{debug/raw\_grasp\_streak} (longer holds) before
+    \texttt{debug/dense\_terms/inside} starts firing,
+  \item \texttt{curriculum/stage} stepping up only after
+    \texttt{curriculum/success\_rate\_window} crosses the configured
+    thresholds.
+\end{itemize}
+Failure to observe these patterns under the default weights is itself a
+useful signal: it indicates that the strict gates are still too tight at the
+current stage and should be relaxed via CLI before re-running.
+
+\section*{Reproducibility Notes}
+\begin{itemize}
+  \item Main components: PPO reward-shaping v3 training pipeline, dense+strict
+    wrapper, curriculum entrypoint, deterministic evaluation pipeline.
+  \item Data sources: versioned training metrics logs for the v1, v2, and v3
+    experiments; CSVs and TensorBoard runs under \texttt{models/<run\_name>/logs}.
+  \item Evaluation media: rollout videos generated from deterministic policy
+    inference, $2 \times 2$ tiled cameras, saved under
+    \texttt{eval\_videos/<run\_name>/}.
+  \item Branch: \texttt{feature/test-new-reward-shaping}, commits
+    \texttt{a6ad4e6} \dots \texttt{2646c74}.
+\end{itemize}
+
+\end{document}

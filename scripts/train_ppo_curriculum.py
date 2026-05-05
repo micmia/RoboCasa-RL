@@ -259,7 +259,7 @@ def main():
 
     train_device = "cuda" if args.gpu else args.device
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = args.run_name or f"curriculum_{timestamp}"
+    run_name = args.run_name or f"ppo_curriculum_{timestamp}"
     run_dir = os.path.join(args.model_dir, run_name)
     os.makedirs(run_dir, exist_ok=True)
     log_root = args.log_root if args.log_root is not None else os.path.join(run_dir, "logs")

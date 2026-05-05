@@ -87,7 +87,7 @@ def main():
         has_offscreen_renderer=has_offscreen,
         control_freq=20,
         ignore_done=False,
-        horizon=500,
+        horizon=1000,
         camera_names=VIZ_CAMERAS,
         camera_heights=256,
         camera_widths=256,

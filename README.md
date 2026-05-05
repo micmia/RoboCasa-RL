@@ -108,8 +108,6 @@ uv run python scripts/train_ppo_reward_shaping_v3.py \
   --horizon 900 \
   --total_timesteps 3000000 \
   --n_envs 1 \
-  --load_model '' \
-  --load_vecnorm '' \
   --run_name ppo_reward_shaping_v3_20260505_002229
 ```
 

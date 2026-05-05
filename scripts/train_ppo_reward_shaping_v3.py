@@ -1,4 +1,10 @@
-"""Train PPO with phase-aware reward shaping for pick-apple-and-place-into-bowl."""
+"""Train PPO v3: transport-dominant reward shaping for pick-apple-and-place-into-bowl.
+
+Earlier coefficient choices let lift_sustain_reward dominate (e.g. 2.0/step over long horizons),
+which encouraged holding the apple in the air instead of transporting it to the bowl.
+This v3 default reduces lift_sustain to 0.3/step (height-scaled), raises transport_reward to 15.0,
+and reduces grasp_lift_bonus to 1.0 so transport signal dominates throughout.
+"""
 
 import argparse
 import csv
@@ -225,8 +231,10 @@ class AtomicRewardShapingWrapper(gym.Wrapper):
         phase_cap="full",
         retraction_reward=4.0,
         retraction_dist_m=0.0,
+        lift_height_target_m=0.0,
     ):
         super().__init__(env)
+        self.lift_height_target_m = float(lift_height_target_m)
         self.reach_reward = reach_reward
         self.reach_abs_coef = float(reach_abs_coef)
         self.retraction_reward = float(retraction_reward)
@@ -497,7 +505,13 @@ class AtomicRewardShapingWrapper(gym.Wrapper):
             else:
                 if not self._ever_grasp_lifted:
                     shaped += scale * self.grasp_lift_bonus
-                shaped += scale * self.lift_sustain_reward
+                # Scale lift sustain by height fraction so there's a gradient to lift higher.
+                # If lift_height_target_m==0, sustain uses a flat height factor (no scaling).
+                if self.lift_height_target_m > 0:
+                    height_factor = max(0.05, min(1.0, height / self.lift_height_target_m))
+                else:
+                    height_factor = 1.0
+                shaped += scale * self.lift_sustain_reward * height_factor
 
             # Encourage gripper release once apple is inside the bowl.
             if inside_bowl:
@@ -692,6 +706,7 @@ def make_env(args, rank, monitor_root):
             phase_cap=args.phase_cap,
             retraction_reward=args.retraction_reward,
             retraction_dist_m=args.retraction_dist_m,
+            lift_height_target_m=args.lift_height_target_m,
         )
         log_dir = os.path.join(monitor_root, f"env_{rank}")
         os.makedirs(log_dir, exist_ok=True)
@@ -718,11 +733,11 @@ def main():
         default=True,
         help="Run without on-screen renderer (default: on). Use --no-headless for GUI.",
     )
-    parser.add_argument("--horizon", type=int, default=700)
+    parser.add_argument("--horizon", type=int, default=900)
     parser.add_argument("--n_envs", type=int, default=1)
     parser.add_argument("--total_timesteps", type=int, default=3_000_000)
-    parser.add_argument("--learning_rate", type=float, default=5e-5)
-    parser.add_argument("--lr_final", type=float, default=5e-6)
+    parser.add_argument("--learning_rate", type=float, default=3e-5)
+    parser.add_argument("--lr_final", type=float, default=1e-6)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--n_steps", type=int, default=2048)
     parser.add_argument("--gamma", type=float, default=0.99)
@@ -740,13 +755,13 @@ def main():
     parser.add_argument(
         "--load_model",
         type=str,
-        default="models/ppo_reward_shaping_v2_20260424_170825/checkpoints/ppo_ckpt_3000000_steps.zip",
+        default="models/ppo_reward_shaping_v3_20260427_000723/checkpoints/ppo_ckpt_1500000_steps.zip",
         help="Path to a .zip checkpoint to fine-tune from. Pass empty string to train from scratch.",
     )
     parser.add_argument(
         "--load_vecnorm",
         type=str,
-        default="models/ppo_reward_shaping_v2_20260424_170825/checkpoints/ppo_ckpt_vecnormalize_3000000_steps.pkl",
+        default="models/ppo_reward_shaping_v3_20260427_000723/checkpoints/ppo_ckpt_vecnormalize_1500000_steps.pkl",
         help="Path to a VecNormalize .pkl for initial stats. Pass empty string for fresh normalisation.",
     )
 
@@ -757,19 +772,19 @@ def main():
     parser.add_argument("--grasp_hold_reward", type=float, default=0.01)
     parser.add_argument("--pre_grasp_reward", type=float, default=0.3)
     parser.add_argument("--grasp_reward", type=float, default=3.0)
-    parser.add_argument("--drop_penalty", type=float, default=2.0)
-    parser.add_argument("--release_reward", type=float, default=2.0)
+    parser.add_argument("--drop_penalty", type=float, default=3.0)
+    parser.add_argument("--release_reward", type=float, default=4.0)
     parser.add_argument("--gripper_open_reward", type=float, default=0.1)
     parser.add_argument("--gripper_close_reward", type=float, default=0.3)
     parser.add_argument("--lift_reward", type=float, default=0.5)
     parser.add_argument("--lift_threshold", type=float, default=0.005)
-    parser.add_argument("--lift_sustain_reward", type=float, default=2.0)
-    parser.add_argument("--grasp_lift_bonus", type=float, default=5.0)
+    parser.add_argument("--lift_sustain_reward", type=float, default=0.3)
+    parser.add_argument("--grasp_lift_bonus", type=float, default=1.0)
     parser.add_argument("--phase_cap", type=str, default="full", choices=["full", "lift"])
     parser.add_argument("--freeze_base", action="store_true", default=False)
     parser.add_argument("--base_action_start", type=int, default=8)
-    parser.add_argument("--transport_reward", type=float, default=6.0)
-    parser.add_argument("--place_reward", type=float, default=3.0)
+    parser.add_argument("--transport_reward", type=float, default=15.0)
+    parser.add_argument("--place_reward", type=float, default=10.0)
     parser.add_argument("--success_reward", type=float, default=100.0)
     parser.add_argument("--action_penalty_weight", type=float, default=0.005)
     parser.add_argument("--table_height", type=float, default=0.88)
@@ -787,8 +802,10 @@ def main():
     parser.add_argument("--air_close_grip_threshold", type=float, default=0.70)
     parser.add_argument("--air_close_dist_m", type=float, default=0.10)
     parser.add_argument("--air_close_penalty", type=float, default=0.05)
-    parser.add_argument("--retraction_reward", type=float, default=4.0)
+    parser.add_argument("--retraction_reward", type=float, default=8.0)
     parser.add_argument("--retraction_dist_m", type=float, default=0.0)
+    parser.add_argument("--lift_height_target_m", type=float, default=0.10,
+                        help="Scale lift_sustain_reward by height/target; 0=flat (no height scaling).")
 
     args = parser.parse_args()
 

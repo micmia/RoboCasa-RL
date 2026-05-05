@@ -141,7 +141,7 @@ Hyperparamètres liés à ce script (modifiables en CLI) :
 | `scripts/train_robocasa.py`        | Entraînement PPO, wrapper de récompense dense optionnel, environnements vectorisés |
 | `scripts/eval_robocasa.py`         | Chargement du modèle, évaluation par épisodes, enregistrement vidéo optionnel      |
 | `env/custom_pnp_counter_to_cab.py` | Environnement atomique personnalisé, mise en page et objets                        |
-| `docs/ATOMIC_TASK_USAGE.md`        | Installation et utilisation en ligne de commande                                   |
+| `README.md`                         | Installation et utilisation en ligne de commande (section Usage)                   |
 
 
 ---

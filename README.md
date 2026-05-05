@@ -4,7 +4,7 @@ Reinforcement learning experiments built on top of [RoboCasa](https://github.com
 
 ## Installation
 
-These instructions use [`uv`](https://docs.astral.sh/uv/) for environment and package management. Install it first if you haven't:
+These instructions use [uv](https://docs.astral.sh/uv/) for environment and package management. Install it first if you haven't:
 
 ```shell
 pip install uv
@@ -60,6 +60,8 @@ cd ..
 
 ## Usage
 
+Run everything from the **repository root** with the venv activated (`source .venv/bin/activate` or `uv run …`).
+
 ### Demo
 
 ```shell
@@ -69,54 +71,121 @@ python robocasa/robocasa/demos/demo_kitchen_scenes.py
 mjpython robocasa/robocasa/demos/demo_kitchen_scenes.py
 ```
 
-### Training (PPO, atomic `PnPCounterToCab`)
+### Training — PPO v1 and v2 (cabinet, `PnPCounterToCab`)
 
-From the repo root, with the venv activated. The atomic task **`PnPCounterToCab`** uses the kitchen **counter** as a fixture; in this repo the **object placed on that counter** is always the apple **`apple_1`** (see `env/custom_pnp_counter_to_cab.py`). The goal is to pick it up and place it in the cabinet. Use `--headless` on servers without a display.
+The atomic task **PnPCounterToCab** uses the kitchen counter; the manipulated object is the apple **apple_1** (`env/custom_pnp_counter_to_cab.py`). Goal: pick and place into the cabinet. Use `--headless` on servers without a display.
 
-**Baseline** (no custom dense shaping):
-
-```shell
-uv run python scripts/train_ppo_baseline.py \
-  --headless \
-  --total_timesteps 300000 \
-  --n_envs 1 \
-  --run_name baseline_seed42
-```
-
-**Reward shaping** (dense reach / grasp / place / success bonuses):
+**v1** (default horizon **700**, **3M** steps):
 
 ```shell
-uv run python scripts/train_ppo_reward_shaping.py \
+uv run python scripts/train_ppo_reward_shaping_v1.py \
   --task PnPCounterToCab \
   --headless \
-  --total_timesteps 300000 \
+  --total_timesteps 3000000 \
   --n_envs 1 \
-  --run_name reward_shaping_seed42
+  --run_name ppo_reward_shaping_v1_20260505_seed42
 ```
 
-**Curriculum** (staged difficulty; optional):
+**v2** (default horizon **700**; contact / grasp-hold / lift-sustain terms; **3M** steps in this example):
 
 ```shell
-uv run python scripts/train_ppo_curriculum.py \
-  --task PnPCounterToCab \
+uv run python scripts/train_ppo_reward_shaping_v2.py \
   --headless \
-  --total_timesteps 300000 \
+  --total_timesteps 3000000 \
   --n_envs 1 \
-  --run_name curriculum_seed42
+  --run_name ppo_reward_shaping_v2_20260425_155559
 ```
 
-Checkpoints and logs are written under `models/<run_name>/` (e.g. `ppo_final.zip`, `logs/metrics.csv`, TensorBoard under `logs/tensorboard/`). More flags and behavior are documented in [`docs/ATOMIC_TASK_USAGE.md`](docs/ATOMIC_TASK_USAGE.md).
+Artifacts: `models/<run_name>/ppo_final.zip`, `vec_normalize.pkl` (unless `--no_vecnorm`), `logs/metrics.csv`, `logs/tensorboard/`. In evaluation, pass `--stack shaping_v1` or `--stack shaping_v2` to match training.
 
-### Evaluation
+### Training — PPO v3 (apple-to-bowl, `train_ppo_reward_shaping_v3.py`)
 
-Load a trained policy and run rollouts (deterministic actions by default). Replace `<run_name>` with the directory you used when training.
+Default horizon **900**. The script **defaults to loading** a prior checkpoint and VecNormalize stats for fine-tuning; to train **from scratch**, clear those paths (empty string). Example:
+
+```shell
+uv run python scripts/train_ppo_reward_shaping_v3.py \
+  --headless \
+  --horizon 900 \
+  --total_timesteps 3000000 \
+  --n_envs 1 \
+  --load_model '' \
+  --load_vecnorm '' \
+  --run_name ppo_reward_shaping_v3_20260505_002229
+```
+
+To **fine-tune** instead, omit `--load_model` / `--load_vecnorm` or set them to your `.zip` / `.pkl` pair.
+
+GUI (single env): `--no-headless` instead of `--headless`.
+
+### Evaluation — PPO (`eval_robocasa.py`)
+
+`--stack` must match training (`shaping_v1`, `shaping_v2`, `shaping_v3`). With `--stack auto`, the script infers from the model path and observation size when possible.
+
+**v1 — cabinet** (horizon **700**):
 
 ```shell
 uv run python scripts/eval_robocasa.py \
-  --task PnPCounterToCab \
-  --model_path models/<run_name>/ppo_final.zip \
+  --model_path models/ppo_reward_shaping_v1_20260505_seed42/ppo_final.zip \
+  --stack shaping_v1 \
+  --task counter_to_cab \
+  --horizon 700 \
   --episodes 10 \
   --save_video
 ```
 
-Videos are saved under `eval_videos/<run_name>/` when `--save_video` is set (see `--video_path` to change the root).
+**v2 — cabinet** (horizon **700**):
+
+```shell
+uv run python scripts/eval_robocasa.py \
+  --model_path models/ppo_reward_shaping_v2_20260425_155559/ppo_final.zip \
+  --stack shaping_v2 \
+  --task counter_to_cab \
+  --horizon 700 \
+  --episodes 10 \
+  --save_video
+```
+
+**v3 — apple-to-bowl** (horizon **900**; `vec_normalize.pkl` beside the zip is used automatically if present):
+
+```shell
+uv run python scripts/eval_robocasa.py \
+  --model_path models/ppo_reward_shaping_v3_20260427_000723/ppo_final.zip \
+  --stack shaping_v3 \
+  --task apple_to_bowl \
+  --horizon 900 \
+  --episodes 5 \
+  --save_video \
+  --video_dir eval_videos
+```
+
+Videos: `eval_videos/<parent-folder-of-ppo_final.zip>/ep_00.mp4`, … (e.g. `eval_videos/ppo_reward_shaping_v3_20260427_000723/ep_00.mp4`).
+
+### Training — SAC + HER (bowl, `train_sac_her_bowl.py`)
+
+Default `**--total_timesteps**` is **200000**; built-in curricula (reward phase, pre-grasp, success radius, base DOF) use milestones up to **700k** steps, so a full run should use a larger budget, for example:
+
+```shell
+uv run python scripts/train_sac_her_bowl.py \
+  --headless \
+  --horizon 400 \
+  --total_timesteps 700000 \
+  --run_name sac_her_bowl_20260505_deep
+```
+
+Outputs: `models/<run_name>/sac_her_final.zip` and `models/<run_name>/checkpoints/sac_her_<steps>_steps.zip`.
+
+### Evaluation — SAC + HER (`eval_sac_her.py`)
+
+Default checkpoint in the script points at `models/sac_her/checkpoints/sac_her_350000_steps.zip` if you do not pass `--model_path`. Typical invocation:
+
+```shell
+uv run python scripts/eval_sac_her.py \
+  --model_path models/sac_her_bowl_20260505_deep/sac_her_final.zip \
+  --reward_phase 1C \
+  --pre_grasp_mode partial \
+  --horizon 400 \
+  --episodes 10 \
+  --save_video
+```
+
+With `--save_video`, files go under `eval_videos/checkpoints/<checkpoint_stem>/` (e.g. `…/sac_her_final/ep_00.mp4`).

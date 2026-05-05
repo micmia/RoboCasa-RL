@@ -1,6 +1,17 @@
 # RoboCasa-RL
 
-Reinforcement learning experiments built on top of [RoboCasa](https://github.com/robocasa/robocasa) and [robosuite](https://github.com/ARISE-Initiative/robosuite).
+Reinforcement learning experiments on RoboCasa kitchen manipulation: **PPO** with dense reward shaping (v1–v3) and **SAC + HER** with curriculum. Built on [RoboCasa](https://github.com/robocasa/robocasa) and [robosuite](https://github.com/ARISE-Initiative/robosuite).
+
+**Report:** [experiment_report.pdf](reports/experiment_report.pdf) (PPO vs SAC+HER, tasks, metrics, and failure modes).
+
+## Repository layout
+
+| Path | Role |
+|------|------|
+| `scripts/` | Training and evaluation CLIs (`train_ppo_reward_shaping_*.py`, `train_sac_her_bowl.py`, `eval_robocasa.py`, `eval_sac_her.py`, …) |
+| `env/` | Custom gym-style stacks and task wrappers used by the trainers |
+| `reports/` | LaTeX/PDF coursework report and figures |
+| `models/` | Saved checkpoints (created when you train; examples below use run folders that match this repo when present) |
 
 ## Installation
 
@@ -83,7 +94,7 @@ uv run python scripts/train_ppo_reward_shaping_v1.py \
   --headless \
   --total_timesteps 3000000 \
   --n_envs 1 \
-  --run_name ppo_reward_shaping_v1_20260505_seed42
+  --run_name ppo_reward_shaping_v1_20260425_155559
 ```
 
 **v2** (default horizon **700**; contact / grasp-hold / lift-sustain terms; **3M** steps in this example):
@@ -93,10 +104,10 @@ uv run python scripts/train_ppo_reward_shaping_v2.py \
   --headless \
   --total_timesteps 3000000 \
   --n_envs 1 \
-  --run_name ppo_reward_shaping_v2_20260425_155559
+  --run_name ppo_reward_shaping_v2_20260424_170825
 ```
 
-Artifacts: `models/<run_name>/ppo_final.zip`, `vec_normalize.pkl` (unless `--no_vecnorm`), `logs/metrics.csv`, `logs/tensorboard/`. In evaluation, pass `--stack shaping_v1` or `--stack shaping_v2` to match training.
+Artifacts: `models/<run_name>/ppo_final.zip`, `vec_normalize.pkl` (unless `--no_vecnorm`), periodic `checkpoints/ppo_ckpt_*_steps.zip`, `logs/metrics.csv`, `logs/tensorboard/`. In evaluation, pass `--stack shaping_v1` or `--stack shaping_v2` to match training.
 
 ### Training — PPO v3 (apple-to-bowl, `train_ppo_reward_shaping_v3.py`)
 
@@ -108,7 +119,7 @@ uv run python scripts/train_ppo_reward_shaping_v3.py \
   --horizon 900 \
   --total_timesteps 3000000 \
   --n_envs 1 \
-  --run_name ppo_reward_shaping_v3_20260505_002229
+  --run_name ppo_reward_shaping_v3_my_run
 ```
 
 To **fine-tune** instead, omit `--load_model` / `--load_vecnorm` or set them to your `.zip` / `.pkl` pair.
@@ -123,7 +134,7 @@ GUI (single env): `--no-headless` instead of `--headless`.
 
 ```shell
 uv run python scripts/eval_robocasa.py \
-  --model_path models/ppo_reward_shaping_v1_20260505_seed42/ppo_final.zip \
+  --model_path models/ppo_reward_shaping_v1_20260425_155559/ppo_final.zip \
   --stack shaping_v1 \
   --task counter_to_cab \
   --horizon 700 \
@@ -135,7 +146,7 @@ uv run python scripts/eval_robocasa.py \
 
 ```shell
 uv run python scripts/eval_robocasa.py \
-  --model_path models/ppo_reward_shaping_v2_20260425_155559/ppo_final.zip \
+  --model_path models/ppo_reward_shaping_v2_20260424_170825/ppo_final.zip \
   --stack shaping_v2 \
   --task counter_to_cab \
   --horizon 700 \
@@ -143,11 +154,12 @@ uv run python scripts/eval_robocasa.py \
   --save_video
 ```
 
-**v3 — apple-to-bowl** (horizon **900**; `vec_normalize.pkl` beside the zip is used automatically if present):
+**v3 — apple-to-bowl** (horizon **900**). If you have `models/<run>/ppo_final.zip` and `vec_normalize.pkl` in the same directory, `--vecnorm_path` is optional. Many local runs only keep periodic checkpoints under `checkpoints/`; then pass a **matching** policy zip and VecNormalize pickle (same step count `<N>`):
 
 ```shell
 uv run python scripts/eval_robocasa.py \
-  --model_path models/ppo_reward_shaping_v3_20260427_000723/ppo_final.zip \
+  --model_path models/ppo_reward_shaping_v3_20260427_000723/checkpoints/ppo_ckpt_900000_steps.zip \
+  --vecnorm_path models/ppo_reward_shaping_v3_20260427_000723/checkpoints/ppo_ckpt_vecnormalize_900000_steps.pkl \
   --stack shaping_v3 \
   --task apple_to_bowl \
   --horizon 900 \
@@ -156,18 +168,18 @@ uv run python scripts/eval_robocasa.py \
   --video_dir eval_videos
 ```
 
-Videos: `eval_videos/<parent-folder-of-ppo_final.zip>/ep_00.mp4`, … (e.g. `eval_videos/ppo_reward_shaping_v3_20260427_000723/ep_00.mp4`).
+Videos: under `--video_dir`, in a subfolder named after the parent directory of the model file (often `…/eval_videos/checkpoints/ep_00.mp4` when loading from `…/checkpoints/*.zip`).
 
 ### Training — SAC + HER (bowl, `train_sac_her_bowl.py`)
 
-Default `**--total_timesteps**` is **200000**; built-in curricula (reward phase, pre-grasp, success radius, base DOF) use milestones up to **700k** steps, so a full run should use a larger budget, for example:
+Default `--total_timesteps` is **200000**; built-in curricula (reward phase, pre-grasp, success radius, base DOF) use milestones up to **700k** steps, so a full run should use a larger budget, for example:
 
 ```shell
 uv run python scripts/train_sac_her_bowl.py \
   --headless \
   --horizon 400 \
   --total_timesteps 700000 \
-  --run_name sac_her_bowl_20260505_deep
+  --run_name sac_her_bowl_my_run
 ```
 
 Outputs: `models/<run_name>/sac_her_final.zip` and `models/<run_name>/checkpoints/sac_her_<steps>_steps.zip`.
@@ -178,7 +190,7 @@ Default checkpoint in the script points at `models/sac_her/checkpoints/sac_her_3
 
 ```shell
 uv run python scripts/eval_sac_her.py \
-  --model_path models/sac_her_bowl_20260505_deep/sac_her_final.zip \
+  --model_path models/sac_her/checkpoints/sac_her_350000_steps.zip \
   --reward_phase 1C \
   --pre_grasp_mode partial \
   --horizon 400 \
@@ -186,4 +198,4 @@ uv run python scripts/eval_sac_her.py \
   --save_video
 ```
 
-With `--save_video`, files go under `eval_videos/checkpoints/<checkpoint_stem>/` (e.g. `…/sac_her_final/ep_00.mp4`).
+With `--save_video`, files go under `eval_videos/checkpoints/<checkpoint_stem>/` (e.g. `eval_videos/checkpoints/sac_her_350000_steps/ep_00.mp4`).

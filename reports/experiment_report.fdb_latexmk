@@ -1,5 +1,5 @@
 # Fdb version 4
-["pdflatex"] 1778017341.00103 "ppo_reward_shaping_experiment_report.tex" "ppo_reward_shaping_experiment_report.pdf" "ppo_reward_shaping_experiment_report" 1778017341.55771 0
+["pdflatex"] 1778017845.9011 "experiment_report.tex" "experiment_report.pdf" "experiment_report" 1778017846.45652 0
   "/usr/local/texlive/2025basic/texmf-dist/fonts/enc/dvips/lm/lm-ec.enc" 1254269338 2375 baa924870cfb487815765f9094cf3728 ""
   "/usr/local/texlive/2025basic/texmf-dist/fonts/enc/dvips/lm/lm-mathex.enc" 1202520719 3486 c7eadf5dcc57b3b2d11736679f6636ba ""
   "/usr/local/texlive/2025basic/texmf-dist/fonts/enc/dvips/lm/lm-mathit.enc" 1202520719 2405 5dcf2c1b967ee25cc46c58cd52244aed ""
@@ -115,20 +115,20 @@
   "/usr/local/texlive/2025basic/texmf-var/fonts/map/pdftex/updmap/pdftex.map" 1772120698 114220 074139d848803ff7703c36ea87b9c272 ""
   "/usr/local/texlive/2025basic/texmf-var/web2c/pdftex/pdflatex.fmt" 1759391196 2663823 ea39ab70da760b1c8fb6a362d5d410de ""
   "/usr/local/texlive/2025basic/texmf.cnf" 1741448314 628 81d1ada0f601fb1ffa62f1323192d946 ""
+  "experiment_report.aux" 1778017846.38335 8453 5c65ffe7c23f8b8c096d00ee697e6629 "pdflatex"
+  "experiment_report.out" 1778017846.38419 5930 faa1e8319f3c8c20dae6a86432398152 "pdflatex"
+  "experiment_report.tex" 1778017603.16674 26985 4a97f417d4b798ce6dc3b6fcaf16de7b ""
+  "experiment_report.toc" 1778017846.38442 2969 e4d0cbe4d70acd965f3314f3e0884498 "pdflatex"
   "images/learning_curve_ep_rew_mean_v1_v2_v3.pdf" 1777992144.69562 54383 16f85a4cdfd0d8ac14677355842e6b47 ""
   "images/sac_her_learning_curves.png" 1777992069.76445 125976 8127133ca386bce94b7f205f5e0bb01e ""
   "images/sac_her_opend_releD.png" 1777992069.76861 104166 bd9a95c6fc42d8dc607d7b7fc11d9436 ""
   "images/sac_her_phase_annotations.png" 1777992069.77137 154693 7ff4bcbd1af978ff80c11508041ff894 ""
   "images/task_visualization_v3_ep00_first6s_montage.png" 1778014669.73547 1240638 169859db506bab89599d3cb7346df4f0 ""
   "images/training_curves_v1_v2_v3.pdf" 1777992145.37854 58571 96eb1bfa2771841d05f850c58f6b5421 ""
-  "ppo_reward_shaping_experiment_report.aux" 1778017341.48551 8453 5c65ffe7c23f8b8c096d00ee697e6629 "pdflatex"
-  "ppo_reward_shaping_experiment_report.out" 1778017341.48634 5930 faa1e8319f3c8c20dae6a86432398152 "pdflatex"
-  "ppo_reward_shaping_experiment_report.tex" 1778017336.21693 26985 4a97f417d4b798ce6dc3b6fcaf16de7b ""
-  "ppo_reward_shaping_experiment_report.toc" 1778017341.48655 2969 e4d0cbe4d70acd965f3314f3e0884498 "pdflatex"
   (generated)
-  "ppo_reward_shaping_experiment_report.aux"
-  "ppo_reward_shaping_experiment_report.log"
-  "ppo_reward_shaping_experiment_report.out"
-  "ppo_reward_shaping_experiment_report.pdf"
-  "ppo_reward_shaping_experiment_report.toc"
+  "experiment_report.aux"
+  "experiment_report.log"
+  "experiment_report.out"
+  "experiment_report.pdf"
+  "experiment_report.toc"
   (rewritten before read)

@@ -11,7 +11,7 @@ Reinforcement learning experiments on RoboCasa kitchen manipulation: **PPO** wit
 | `scripts/` | Training and evaluation CLIs (`train_ppo_reward_shaping_*.py`, `train_sac_her_bowl.py`, `eval_robocasa.py`, `eval_sac_her.py`, …) |
 | `env/` | Custom gym-style stacks and task wrappers used by the trainers |
 | `reports/` | LaTeX/PDF coursework report and figures |
-| `models/` | Saved checkpoints (created when you train; examples below use run folders that match this repo when present) |
+| `models/` | Saved model artifacts (examples below use `*_final.zip` files in run folders) |
 
 ## Installation
 
@@ -107,7 +107,7 @@ uv run python scripts/train_ppo_reward_shaping_v2.py \
   --run_name ppo_reward_shaping_v2_20260424_170825
 ```
 
-Artifacts: `models/<run_name>/ppo_final.zip`, `vec_normalize.pkl` (unless `--no_vecnorm`), periodic `checkpoints/ppo_ckpt_*_steps.zip`, `logs/metrics.csv`, `logs/tensorboard/`. In evaluation, pass `--stack shaping_v1` or `--stack shaping_v2` to match training.
+Artifacts: `models/<run_name>/ppo_final.zip`, `vec_normalize.pkl` (unless `--no_vecnorm`), `logs/metrics.csv`, `logs/tensorboard/`. In evaluation, pass `--stack shaping_v1` or `--stack shaping_v2` to match training.
 
 ### Training — PPO v3 (apple-to-bowl, `train_ppo_reward_shaping_v3.py`)
 
@@ -154,12 +154,11 @@ uv run python scripts/eval_robocasa.py \
   --save_video
 ```
 
-**v3 — apple-to-bowl** (horizon **900**). If you have `models/<run>/ppo_final.zip` and `vec_normalize.pkl` in the same directory, `--vecnorm_path` is optional. Many local runs only keep periodic checkpoints under `checkpoints/`; then pass a **matching** policy zip and VecNormalize pickle (same step count `<N>`):
+**v3 — apple-to-bowl** (horizon **900**; `vec_normalize.pkl` beside the zip is used automatically if present):
 
 ```shell
 uv run python scripts/eval_robocasa.py \
-  --model_path models/ppo_reward_shaping_v3_20260427_000723/checkpoints/ppo_ckpt_900000_steps.zip \
-  --vecnorm_path models/ppo_reward_shaping_v3_20260427_000723/checkpoints/ppo_ckpt_vecnormalize_900000_steps.pkl \
+  --model_path models/ppo_reward_shaping_v3_20260427_000723/ppo_final.zip \
   --stack shaping_v3 \
   --task apple_to_bowl \
   --horizon 900 \
@@ -168,7 +167,7 @@ uv run python scripts/eval_robocasa.py \
   --video_dir eval_videos
 ```
 
-Videos: under `--video_dir`, in a subfolder named after the parent directory of the model file (often `…/eval_videos/checkpoints/ep_00.mp4` when loading from `…/checkpoints/*.zip`).
+Videos: `eval_videos/<run_name>/ep_00.mp4`, … (e.g. `eval_videos/ppo_reward_shaping_v3_20260427_000723/ep_00.mp4`).
 
 ### Training — SAC + HER (bowl, `train_sac_her_bowl.py`)
 
@@ -182,20 +181,21 @@ uv run python scripts/train_sac_her_bowl.py \
   --run_name sac_her_bowl_my_run
 ```
 
-Outputs: `models/<run_name>/sac_her_final.zip` and `models/<run_name>/checkpoints/sac_her_<steps>_steps.zip`.
+Outputs: `models/<run_name>/sac_her_final.zip`.
 
 ### Evaluation — SAC + HER (`eval_sac_her.py`)
 
-Default checkpoint in the script points at `models/sac_her/checkpoints/sac_her_350000_steps.zip` if you do not pass `--model_path`. Typical invocation:
+Use the final model explicitly with `--model_path`:
 
 ```shell
 uv run python scripts/eval_sac_her.py \
-  --model_path models/sac_her/checkpoints/sac_her_350000_steps.zip \
+  --model_path models/sac_her/sac_her_final.zip \
   --reward_phase 1C \
   --pre_grasp_mode partial \
   --horizon 400 \
   --episodes 10 \
-  --save_video
+  --save_video \
+  --video_dir eval_videos
 ```
 
-With `--save_video`, files go under `eval_videos/checkpoints/<checkpoint_stem>/` (e.g. `eval_videos/checkpoints/sac_her_350000_steps/ep_00.mp4`).
+With `--save_video --video_dir eval_videos`, files go under `eval_videos/<model_stem>/` (e.g. `eval_videos/sac_her_final/ep_00.mp4`).
